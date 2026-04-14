@@ -16,7 +16,7 @@ import websockets
 from .appliance import Appliance
 from .cloud_auth import SZGCloudAuth, TokenSet
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
-from .exceptions import SZGError, ConnectionError
+from .exceptions import ConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .cloud_const import (
-    B2C_TENANT, B2C_HOST, B2C_POLICY, CLIENT_ID,
-    REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
+    CLIENT_ID, REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
 )
 from .exceptions import AuthenticationError
 
