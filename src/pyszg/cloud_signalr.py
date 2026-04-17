@@ -188,7 +188,12 @@ class SZGCloudSignalR:
         ssl_context = await loop.run_in_executor(None, ssl.create_default_context)
 
         _LOGGER.info("Connecting to SignalR...")
-        async with websockets.connect(ws_url, ssl=ssl_context) as ws:
+        async with websockets.connect(
+            ws_url,
+            ssl=ssl_context,
+            ping_interval=20,
+            ping_timeout=10,
+        ) as ws:
             self._ws = ws
 
             # Handshake
@@ -211,10 +216,22 @@ class SZGCloudSignalR:
                     _LOGGER.warning("Failed to get device list: %s", exc)
 
             # Listen loop
+            consecutive_timeouts = 0
             while self._running:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                    consecutive_timeouts = 0
                 except asyncio.TimeoutError:
+                    consecutive_timeouts += 1
+                    # SignalR sends pings every ~15s. If we haven't received
+                    # anything in 4+ timeouts (2+ minutes), the connection
+                    # is dead but the socket hasn't noticed yet.
+                    if consecutive_timeouts >= 4:
+                        _LOGGER.warning(
+                            "No SignalR messages received in %ds, assuming dead connection",
+                            consecutive_timeouts * 30,
+                        )
+                        raise ConnectionError("SignalR connection stale — no messages received")
                     continue
 
                 for part in raw.split(RECORD_SEP):

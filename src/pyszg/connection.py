@@ -192,6 +192,20 @@ class CATStreamConnection:
         except OSError as exc:
             raise ConnectionError(f"Failed to connect to {self._host}:{self._port}: {exc}") from exc
 
+        # Enable TCP keepalive to detect dead connections after network blips.
+        # Without this, a half-open socket can hang recv() indefinitely.
+        try:
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # On Linux, set aggressive keepalive timers (idle 30s, interval 10s, 3 probes)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except OSError:
+            pass  # Keepalive is best-effort
+
         # Authenticate
         unlock_payload = json.dumps(
             {"cmd": "unlock_channel", "params": {"pin": self._pin}},
@@ -256,6 +270,11 @@ class CATStreamConnection:
 
             # Read more data
             try:
+                # Use select to detect dead sockets that recv() would block on
+                import select
+                ready, _, _ = select.select([self._sock], [], [], 1.0)
+                if not ready:
+                    continue
                 chunk = self._sock.recv(8192)
                 if not chunk:
                     self.close()
