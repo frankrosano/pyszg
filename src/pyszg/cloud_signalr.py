@@ -121,8 +121,11 @@ class SZGCloudSignalR:
                 f"/consumerapp/device/{device_id}/directmethod/executeAPICmd",
                 data=payload,
             )
-        except Exception:
-            pass  # CAT modules return 500 with "OK"
+            _LOGGER.debug("open_cloud_async succeeded for %s", device_id)
+        except Exception as exc:
+            # CAT modules return 500 with "OK" which is normal.
+            # Log at debug so we can diagnose Saber/NGIX issues.
+            _LOGGER.debug("open_cloud_async for %s: %s", device_id, exc)
 
     def get_appliance(self, device_id: str) -> Appliance:
         """Get or create an Appliance instance for a device."""
@@ -202,36 +205,45 @@ class SZGCloudSignalR:
             _LOGGER.info("SignalR connected")
 
             # Open async channels (blocking HTTP calls, run in executor)
-            if device_ids:
-                for dev_id in device_ids:
-                    await loop.run_in_executor(None, self._open_cloud_async, dev_id)
-            else:
+            ids_to_open = device_ids
+            if not ids_to_open:
                 try:
                     resp = await loop.run_in_executor(
                         None, self._api_request, "GET", "/consumerapp/user/devices"
                     )
-                    for dev in resp.get("devices", []):
-                        await loop.run_in_executor(None, self._open_cloud_async, dev["id"])
+                    ids_to_open = [dev["id"] for dev in resp.get("devices", [])]
                 except Exception as exc:
                     _LOGGER.warning("Failed to get device list: %s", exc)
+                    ids_to_open = []
+
+            for dev_id in ids_to_open:
+                await loop.run_in_executor(None, self._open_cloud_async, dev_id)
 
             # Listen loop
             consecutive_timeouts = 0
+            last_reopen = asyncio.get_event_loop().time()
+            reopen_interval = 3600  # Consider a device stale after 1 hour of silence
+            device_last_seen: dict[str, float] = {}
+            now = asyncio.get_event_loop().time()
+            for dev_id in (ids_to_open or []):
+                device_last_seen[dev_id] = now
+
             while self._running:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
-                    consecutive_timeouts = 0
                 except asyncio.TimeoutError:
-                    consecutive_timeouts += 1
-                    # SignalR sends pings every ~15s. If we haven't received
-                    # anything in 4+ timeouts (2+ minutes), the connection
-                    # is dead but the socket hasn't noticed yet.
-                    if consecutive_timeouts >= 4:
-                        _LOGGER.warning(
-                            "No SignalR messages received in %ds, assuming dead connection",
-                            consecutive_timeouts * 30,
-                        )
-                        raise ConnectionError("SignalR connection stale — no messages received")
+                    # Check for devices that have gone silent and reopen them
+                    now = asyncio.get_event_loop().time()
+                    for dev_id in (ids_to_open or []):
+                        last = device_last_seen.get(dev_id, 0)
+                        if (now - last) >= reopen_interval:
+                            elapsed = int(now - last)
+                            _LOGGER.info(
+                                "No SignalR data from %s in %ds, re-opening async channel",
+                                dev_id[:16], elapsed,
+                            )
+                            await loop.run_in_executor(None, self._open_cloud_async, dev_id)
+                            device_last_seen[dev_id] = now
                     continue
 
                 for part in raw.split(RECORD_SEP):
@@ -256,6 +268,9 @@ class SZGCloudSignalR:
                     device_id = parsed["device_id"]
                     msg_type = parsed["msg_type"]
                     data = parsed["data"]
+
+                    # Track last message time per device
+                    device_last_seen[device_id] = asyncio.get_event_loop().time()
 
                     # Update internal appliance state
                     appliance = self.get_appliance(device_id)
