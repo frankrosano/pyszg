@@ -196,9 +196,12 @@ class CATStreamConnection:
         # Without this, a half-open socket can hang recv() indefinitely.
         try:
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            # On Linux, set aggressive keepalive timers (idle 30s, interval 10s, 3 probes)
+            # Set aggressive keepalive idle timer (30s before first probe).
+            # Linux uses TCP_KEEPIDLE, macOS uses TCP_KEEPALIVE.
             if hasattr(socket, "TCP_KEEPIDLE"):
                 self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            elif hasattr(socket, "TCP_KEEPALIVE"):
+                self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
             if hasattr(socket, "TCP_KEEPINTVL"):
                 self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
             if hasattr(socket, "TCP_KEEPCNT"):
