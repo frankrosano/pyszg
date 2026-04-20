@@ -254,7 +254,7 @@ class SZGCloudSignalR:
             # Listen loop — exits when token is about to expire
             while self._running:
                 if time.time() >= reconnect_at:
-                    _LOGGER.info("SignalR token expiring soon, reconnecting with fresh token")
+                    _LOGGER.debug("SignalR token expiring soon, reconnecting with fresh token")
                     return  # Clean exit — outer loop will reconnect
 
                 try:
