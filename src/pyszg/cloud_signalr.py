@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import ssl
+import time
 import uuid
 import urllib.request
 import urllib.error
@@ -21,6 +23,22 @@ from .exceptions import ConnectionError
 _LOGGER = logging.getLogger(__name__)
 
 RECORD_SEP = "\x1e"
+
+# Reconnect 5 minutes before the SignalR token expires
+_TOKEN_REFRESH_MARGIN = 300
+
+
+def _get_token_expiry(token: str) -> float:
+    """Extract the exp claim from a JWT. Returns 0 on failure."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return 0
+        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return float(claims.get("exp", 0))
+    except Exception:
+        return 0
 
 
 def _parse_signalr_message(msg: dict[str, Any]) -> dict[str, Any] | None:
@@ -121,8 +139,11 @@ class SZGCloudSignalR:
                 f"/consumerapp/device/{device_id}/directmethod/executeAPICmd",
                 data=payload,
             )
-        except Exception:
-            pass  # CAT modules return 500 with "OK"
+            _LOGGER.debug("open_cloud_async succeeded for %s", device_id)
+        except Exception as exc:
+            # CAT modules return 500 with "OK" which is normal.
+            # Log at debug so we can diagnose Saber/NGIX issues.
+            _LOGGER.debug("open_cloud_async for %s: %s", device_id, exc)
 
     def get_appliance(self, device_id: str) -> Appliance:
         """Get or create an Appliance instance for a device."""
@@ -177,12 +198,26 @@ class SZGCloudSignalR:
         device_ids: list[str] | None,
         callback: Callable | None,
     ) -> None:
-        """Single connection attempt."""
+        """Single connection attempt. Returns when the token is about to expire."""
         loop = asyncio.get_event_loop()
 
         # Run blocking negotiate in executor
         info = await loop.run_in_executor(None, self._negotiate)
         ws_url = info["url"].replace("https://", "wss://") + "&access_token=" + info["accessToken"]
+
+        # Determine when this connection's token expires.
+        # The SignalR access token (1h lifetime) is separate from the OAuth
+        # id_token. Once it expires, Azure stops routing messages but keeps
+        # the WebSocket alive for pings — so we must reconnect before expiry.
+        token_exp = _get_token_expiry(info["accessToken"])
+        if token_exp:
+            reconnect_at = token_exp - _TOKEN_REFRESH_MARGIN
+            ttl = int(token_exp - time.time())
+            _LOGGER.debug("SignalR token expires in %ds, will reconnect in %ds", ttl, ttl - _TOKEN_REFRESH_MARGIN)
+        else:
+            # Fallback: reconnect every 50 minutes if we can't read the token
+            reconnect_at = time.time() + 3000
+            _LOGGER.debug("Could not read SignalR token expiry, will reconnect in 50min")
 
         # Pre-create SSL context in executor to avoid blocking the event loop
         ssl_context = await loop.run_in_executor(None, ssl.create_default_context)
@@ -202,36 +237,29 @@ class SZGCloudSignalR:
             _LOGGER.info("SignalR connected")
 
             # Open async channels (blocking HTTP calls, run in executor)
-            if device_ids:
-                for dev_id in device_ids:
-                    await loop.run_in_executor(None, self._open_cloud_async, dev_id)
-            else:
+            ids_to_open = device_ids
+            if not ids_to_open:
                 try:
                     resp = await loop.run_in_executor(
                         None, self._api_request, "GET", "/consumerapp/user/devices"
                     )
-                    for dev in resp.get("devices", []):
-                        await loop.run_in_executor(None, self._open_cloud_async, dev["id"])
+                    ids_to_open = [dev["id"] for dev in resp.get("devices", [])]
                 except Exception as exc:
                     _LOGGER.warning("Failed to get device list: %s", exc)
+                    ids_to_open = []
 
-            # Listen loop
-            consecutive_timeouts = 0
+            for dev_id in ids_to_open:
+                await loop.run_in_executor(None, self._open_cloud_async, dev_id)
+
+            # Listen loop — exits when token is about to expire
             while self._running:
+                if time.time() >= reconnect_at:
+                    _LOGGER.info("SignalR token expiring soon, reconnecting with fresh token")
+                    return  # Clean exit — outer loop will reconnect
+
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=30)
-                    consecutive_timeouts = 0
                 except asyncio.TimeoutError:
-                    consecutive_timeouts += 1
-                    # SignalR sends pings every ~15s. If we haven't received
-                    # anything in 4+ timeouts (2+ minutes), the connection
-                    # is dead but the socket hasn't noticed yet.
-                    if consecutive_timeouts >= 4:
-                        _LOGGER.warning(
-                            "No SignalR messages received in %ds, assuming dead connection",
-                            consecutive_timeouts * 30,
-                        )
-                        raise ConnectionError("SignalR connection stale — no messages received")
                     continue
 
                 for part in raw.split(RECORD_SEP):
