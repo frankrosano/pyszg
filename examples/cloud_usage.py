@@ -30,7 +30,8 @@ def main():
         auth.save_tokens(tokens, TOKEN_FILE)
     else:
         print("Starting browser login...")
-        tokens = auth.login()
+        from cloud_login import login_interactive
+        tokens = login_interactive(auth)
         auth.save_tokens(tokens, TOKEN_FILE)
 
     print(f"Authenticated as: {tokens.name} ({tokens.email})")

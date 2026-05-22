@@ -1,0 +1,29 @@
+# Product
+
+`pyszg` is a Python client library for Sub-Zero Group connected appliances (Sub-Zero, Wolf, Cove). It is reverse-engineered from the official mobile app and Control4 driver — there is no public API.
+
+## Three transports
+
+The library exposes three independent ways to talk to an appliance:
+
+1. **Local IP** (`SZGClient`) — Direct TLS connection to the appliance's CAT module on port 10. Newline-delimited JSON. Works only for older CAT-module appliances. Read-only without a PIN; full control + persistent push stream after `unlock` + `get_async`.
+2. **Cloud REST** (`SZGCloudClient`) — Azure AD B2C OAuth2 + PKCE auth, REST calls to `prod.iot.subzero.com`. Works for **all** appliances including newer NGIX/Saber modules. State and commands route through Azure IoT Hub direct methods.
+3. **Cloud SignalR** (`SZGCloudSignalR`) — Azure SignalR WebSocket for real-time push. Works for all appliance types. Receives a full state snapshot on connect, then delta updates.
+
+## Module generations
+
+- **CAT** — older modules, all three transports work
+- **NGIX / Saber** — newer modules, cloud only (no local IP)
+
+The `ModuleGeneration` enum in `appliance.py` is parsed from the `applianceId` string.
+
+## Sibling repos in this workspace
+
+- `szg-hass` — Home Assistant custom integration that depends on `pyszg` via git. Sets up local push when a PIN is configured and falls back to cloud SignalR / polling otherwise.
+- `szg-api-exploration` — Throwaway research scripts, decompiled C4 drivers, and protocol notes. Source of truth when the protocol behavior is unclear; do not import from here.
+
+## Design intent
+
+- **One unified `Appliance` model** across all transports — both local and cloud responses funnel through `Appliance.update_from_response()`.
+- **Transports do not auto-fall-back inside `pyszg`**. The library exposes them as separate clients; HA-level fallback logic lives in `szg-hass/coordinator.py`.
+- The auth flow is interactive on first run (browser redirect → paste URL into `redirect_url.txt`, driven by `examples/cloud_login.py`) and silent thereafter via refresh token. Production consumers (the HA integration) drive the same flow without prompting on stdin using `SZGCloudAuth.get_authorize_url` + `exchange_code` directly.

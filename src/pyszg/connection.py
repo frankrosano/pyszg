@@ -9,7 +9,7 @@ import socket
 import time
 from typing import Any
 
-from .exceptions import SZGConnectionError as ConnectionError, AuthenticationError, CommandError
+from .exceptions import SZGConnectionError, AuthenticationError, CommandError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,7 +58,6 @@ class CATConnection:
         self._port = port
         self._timeout = timeout
         self._sock: ssl.SSLSocket | None = None
-        self._authenticated = False
 
     def _connect(self) -> ssl.SSLSocket:
         """Establish a new TLS connection."""
@@ -69,7 +68,7 @@ class CATConnection:
             sock.settimeout(self._timeout)
             return sock
         except OSError as exc:
-            raise ConnectionError(f"Failed to connect to {self._host}:{self._port}: {exc}") from exc
+            raise SZGConnectionError(f"Failed to connect to {self._host}:{self._port}: {exc}") from exc
 
     def _send_command(self, sock: ssl.SSLSocket, cmd: dict[str, Any]) -> dict[str, Any]:
         """Send a JSON command and return the parsed response."""
@@ -79,13 +78,13 @@ class CATConnection:
             sock.sendall(payload)
             data = sock.recv(16384)
             if not data:
-                raise ConnectionError("Connection closed by appliance")
+                raise SZGConnectionError("Connection closed by appliance")
             decoded = data.decode("utf-8").strip()
             response = json.loads(decoded)
             _LOGGER.debug("Received from %s: status=%s", self._host, response.get("status"))
             return response
         except (OSError, json.JSONDecodeError) as exc:
-            raise ConnectionError(f"Communication error: {exc}") from exc
+            raise SZGConnectionError(f"Communication error: {exc}") from exc
 
     def _check_response(self, response: dict[str, Any], context: str = "") -> dict[str, Any]:
         """Check response status and raise appropriate exceptions."""
@@ -178,7 +177,7 @@ class CATStreamConnection:
             The full appliance state dict (same as get_async response).
 
         Raises:
-            ConnectionError: If the connection fails.
+            SZGConnectionError: If the connection fails.
             AuthenticationError: If the PIN is rejected.
         """
         if not self._pin:
@@ -190,7 +189,7 @@ class CATStreamConnection:
             self._sock = ctx.wrap_socket(raw, server_hostname=self._host)
             self._sock.settimeout(self._timeout)
         except OSError as exc:
-            raise ConnectionError(f"Failed to connect to {self._host}:{self._port}: {exc}") from exc
+            raise SZGConnectionError(f"Failed to connect to {self._host}:{self._port}: {exc}") from exc
 
         # Enable TCP keepalive to detect dead connections after network blips.
         # Without this, a half-open socket can hang recv() indefinitely.
@@ -233,7 +232,7 @@ class CATStreamConnection:
         initial = self._read_json_line()
         if initial.get("status") != STATUS_OK:
             self.close()
-            raise ConnectionError(
+            raise SZGConnectionError(
                 initial.get("status_msg", f"get_async failed: status {initial.get('status')}")
             )
 
@@ -255,10 +254,10 @@ class CATStreamConnection:
             Or None if timeout elapsed with no update.
 
         Raises:
-            ConnectionError: If the connection is lost.
+            SZGConnectionError: If the connection is lost.
         """
         if not self._sock:
-            raise ConnectionError("Not connected")
+            raise SZGConnectionError("Not connected")
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -281,7 +280,7 @@ class CATStreamConnection:
                 chunk = self._sock.recv(8192)
                 if not chunk:
                     self.close()
-                    raise ConnectionError("Connection closed by appliance")
+                    raise SZGConnectionError("Connection closed by appliance")
                 self._buffer += chunk
             except socket.timeout:
                 continue
@@ -289,10 +288,10 @@ class CATStreamConnection:
                 if "WANT_READ" in str(e):
                     continue
                 self.close()
-                raise ConnectionError(f"SSL error: {e}") from e
+                raise SZGConnectionError(f"SSL error: {e}") from e
             except OSError as e:
                 self.close()
-                raise ConnectionError(f"Connection lost: {e}") from e
+                raise SZGConnectionError(f"Connection lost: {e}") from e
 
         return None  # Timeout
 
@@ -321,7 +320,7 @@ class CATStreamConnection:
             try:
                 chunk = self._sock.recv(8192)
                 if not chunk:
-                    raise ConnectionError("Connection closed during handshake")
+                    raise SZGConnectionError("Connection closed during handshake")
                 data += chunk
                 if b"\n" in data:
                     line = data.split(b"\n", 1)[0]
@@ -329,7 +328,7 @@ class CATStreamConnection:
                     self._buffer = data.split(b"\n", 1)[1]
                     return json.loads(line.decode("utf-8"))
             except socket.timeout:
-                raise ConnectionError("Timeout waiting for response")
+                raise SZGConnectionError("Timeout waiting for response")
 
     def __enter__(self):
         return self

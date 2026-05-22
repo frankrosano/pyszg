@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from .appliance import Appliance
 from .connection import CATConnection, CATStreamConnection, DEFAULT_PORT
+from .exceptions import SZGConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,10 +26,10 @@ class SZGClient:
         client.refresh()
         client.set_property("cav_light_on", True)
 
-        # Polling:
-        client.start_polling(interval=5, callback=on_change)
-        ...
-        client.stop_polling()
+        # Real-time push (caller manages the loop):
+        client.connect_push()
+        for update in client.push_updates():
+            ...
     """
 
     def __init__(self, host: str, port: int = DEFAULT_PORT, pin: str | None = None):
@@ -37,9 +37,8 @@ class SZGClient:
         self._port = port
         self._pin = pin
         self._conn = CATConnection(host, port)
-        self._appliance = Appliance(host=host)
+        self._appliance = Appliance()
         self._stream: CATStreamConnection | None = None
-        self._polling_task: asyncio.Task | None = None
 
     @property
     def host(self) -> str:
@@ -56,6 +55,12 @@ class SZGClient:
     @property
     def appliance(self) -> Appliance:
         return self._appliance
+
+    @property
+    def is_push_connected(self) -> bool:
+        """True iff a persistent push stream is currently open and the
+        underlying socket is alive."""
+        return self._stream is not None and self._stream.connected
 
     def refresh(self) -> Appliance:
         """Fetch current state from the appliance.
@@ -121,53 +126,11 @@ class SZGClient:
 
     # --- Polling ---
 
-    async def poll_async(
-        self,
-        interval: float = 5.0,
-        callback: Callable[[Appliance], None] | None = None,
-    ) -> None:
-        """Continuously poll the appliance for state changes.
-
-        Args:
-            interval: Seconds between polls.
-            callback: Called with the Appliance instance whenever state changes.
-        """
-        previous_raw: dict[str, Any] = {}
-
-        while True:
-            try:
-                self.refresh()
-                current_raw = self._appliance.raw
-
-                if current_raw != previous_raw and callback:
-                    callback(self._appliance)
-
-                previous_raw = current_raw.copy()
-            except Exception as exc:
-                _LOGGER.warning("Poll failed: %s", exc)
-
-            await asyncio.sleep(interval)
-
-    def start_polling(
-        self,
-        interval: float = 5.0,
-        callback: Callable[[Appliance], None] | None = None,
-        loop: asyncio.AbstractEventLoop | None = None,
-    ) -> None:
-        """Start polling in the background."""
-        if self._polling_task and not self._polling_task.done():
-            return
-
-        _loop = loop or asyncio.get_event_loop()
-        self._polling_task = _loop.create_task(
-            self.poll_async(interval=interval, callback=callback)
-        )
-
-    def stop_polling(self) -> None:
-        """Stop background polling."""
-        if self._polling_task:
-            self._polling_task.cancel()
-            self._polling_task = None
+    # --- Polling (removed) ---
+    # poll_async / start_polling / stop_polling were removed in 0.2.0.
+    # Polling is now the responsibility of the caller (e.g. the HA
+    # DataUpdateCoordinator in szg-hass). See connect_push() / read_update()
+    # for the supported real-time path.
 
     # --- Push (persistent connection) ---
 
@@ -195,7 +158,7 @@ class SZGClient:
         or None on timeout. Also updates the appliance state automatically.
         """
         if not self._stream or not self._stream.connected:
-            raise ConnectionError("No push connection. Call connect_push() first.")
+            raise SZGConnectionError("No push connection. Call connect_push() first.")
         update = self._stream.read_update(timeout=timeout)
         if update and "props" in update:
             # Apply delta to the appliance state
@@ -214,7 +177,7 @@ class SZGClient:
                 print(client.appliance.cavity1.door_ajar)
         """
         if not self._stream:
-            raise ConnectionError("No push connection. Call connect_push() first.")
+            raise SZGConnectionError("No push connection. Call connect_push() first.")
         for update in self._stream:
             if "props" in update:
                 self._appliance.update_from_response(update["props"])

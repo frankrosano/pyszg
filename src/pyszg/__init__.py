@@ -23,12 +23,10 @@ from .appliance import (
 from .exceptions import (
     SZGError,
     SZGConnectionError,
+    SZGTimeoutError,
     AuthenticationError,
     CommandError,
 )
-
-# Keep ConnectionError as an alias in __all__ for convenience
-ConnectionError = SZGConnectionError
 
 __all__ = [
     "SZGClient",
@@ -48,6 +46,7 @@ __all__ = [
     "TEMP_RANGE_OVEN",
     "SZGError",
     "SZGConnectionError",
+    "SZGTimeoutError",
     "AuthenticationError",
     "CommandError",
 ]

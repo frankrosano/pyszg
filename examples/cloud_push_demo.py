@@ -35,7 +35,8 @@ async def main():
         tokens = auth.ensure_valid(tokens)
         auth.save_tokens(tokens, TOKEN_FILE)
     else:
-        tokens = auth.login()
+        from cloud_login import login_interactive
+        tokens = login_interactive(auth)
         auth.save_tokens(tokens, TOKEN_FILE)
 
     print(f"Authenticated as: {tokens.name}")

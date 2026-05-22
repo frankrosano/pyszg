@@ -1,4 +1,13 @@
-"""pyszg exceptions."""
+"""pyszg exceptions.
+
+Library callers (notably the szg-hass integration) catch these to
+classify failures into Home Assistant error types:
+
+- AuthenticationError  -> ConfigEntryAuthFailed (triggers reauth flow)
+- SZGConnectionError   -> ConfigEntryNotReady / UpdateFailed
+- SZGTimeoutError      -> ConfigEntryNotReady / UpdateFailed
+- CommandError         -> entity unavailable / log warning
+"""
 
 
 class SZGError(Exception):
@@ -10,16 +19,16 @@ class SZGError(Exception):
 
 
 class SZGConnectionError(SZGError):
-    """Failed to connect to the appliance module."""
+    """Failed to connect to the appliance module or cloud endpoint."""
+
+
+class SZGTimeoutError(SZGError):
+    """A request timed out waiting for a response."""
 
 
 class AuthenticationError(SZGError):
-    """PIN authentication failed."""
+    """PIN authentication failed, or cloud OAuth tokens are invalid."""
 
 
 class CommandError(SZGError):
-    """Appliance rejected the command."""
-
-
-# Alias for backward compatibility
-ConnectionError = SZGConnectionError
+    """Appliance or cloud rejected the command."""

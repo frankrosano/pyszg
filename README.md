@@ -65,10 +65,12 @@ For all appliances, including newer NGIX/Saber modules without local IP access:
 ```python
 from pyszg import SZGCloudAuth, SZGCloudClient
 
-# First time — opens browser for Sub-Zero account login
+# First time — run examples/cloud_login.py to perform the interactive
+# browser login and write tokens to a file:
+#   python examples/cloud_login.py tokens.json
 auth = SZGCloudAuth()
-tokens = auth.login()
-auth.save_tokens(tokens, "tokens.json")
+tokens = auth.load_tokens("tokens.json")
+tokens = auth.ensure_valid(tokens)
 
 # Subsequent runs — refreshes silently
 tokens = auth.load_tokens("tokens.json")
@@ -110,12 +112,22 @@ asyncio.run(signalr.connect(callback=on_update))
 
 ### Cloud Auth Flow
 
-1. `auth.login()` opens the Sub-Zero login page in your browser
-2. Log in with your Sub-Zero Owner's App credentials
-3. The browser redirects to a URL starting with `msauth.com.subzero.group.owners.app://auth?code=...`
-4. Copy that URL into `redirect_url.txt` and press Enter
-5. The library exchanges the code for tokens and stores a refresh token
-6. Subsequent calls use `auth.ensure_valid()` to silently refresh — no browser needed
+The library only exposes the OAuth building blocks. The interactive
+browser-and-paste flow is in `examples/cloud_login.py`. Run it once
+to produce a tokens file:
+
+```bash
+python examples/cloud_login.py tokens.json
+```
+
+Under the hood:
+
+1. The script opens the Sub-Zero login page in your browser.
+2. Log in with your Sub-Zero Owner's App credentials.
+3. The browser redirects to a URL starting with `msauth.com.subzero.group.owners.app://auth?code=...` (browsers can't resolve this scheme — they show an error page; that's expected).
+4. Copy the full redirect URL from the address bar into `redirect_url.txt`, then press Enter in the terminal.
+5. The script exchanges the code via `SZGCloudAuth.exchange_code` and writes the resulting tokens to disk.
+6. Subsequent calls use `auth.ensure_valid()` to silently refresh — no browser needed.
 
 ## Supported Appliances
 
@@ -166,6 +178,9 @@ Check compatibility at: https://www.subzero-wolf.com/assistance/answers/multi-br
 ## Examples
 
 ```bash
+# Cloud: one-time interactive login (writes cloud_tokens.json)
+python examples/cloud_login.py
+
 # Local: read appliance state
 python examples/basic_usage.py 192.168.1.100 123456
 

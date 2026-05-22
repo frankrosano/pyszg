@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import socket
 import ssl
 import time
 import uuid
@@ -15,10 +16,13 @@ from typing import Any, Callable
 
 import websockets
 
-from .appliance import Appliance
 from .cloud_auth import SZGCloudAuth, TokenSet
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
-from .exceptions import ConnectionError
+from .exceptions import (
+    SZGConnectionError,
+    SZGTimeoutError,
+    AuthenticationError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,7 +106,22 @@ class SZGCloudSignalR:
         self._auth = auth or SZGCloudAuth()
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._running = False
-        self._appliances: dict[str, Appliance] = {}
+        self._token_expires_at: float = 0.0
+
+    @property
+    def is_connected(self) -> bool:
+        """True iff the WebSocket is currently open and the SignalR access
+        token has not yet expired.
+
+        After the token expires Azure stops routing appliance messages
+        even though the WebSocket itself stays open, so this property
+        returns False once the cached expiry is reached.
+        """
+        if self._ws is None or self._ws.closed:
+            return False
+        if self._token_expires_at and time.time() >= self._token_expires_at:
+            return False
+        return True
 
     def _ensure_auth(self) -> None:
         if self._tokens.is_expired:
@@ -123,8 +142,25 @@ class SZGCloudSignalR:
         body = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         ctx = ssl.create_default_context()
-        resp = urllib.request.urlopen(req, timeout=15, context=ctx)
-        return json.loads(resp.read().decode())
+        try:
+            resp = urllib.request.urlopen(req, timeout=15, context=ctx)
+            return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise AuthenticationError(
+                    f"Cloud auth rejected during {path}: HTTP 401",
+                    status=exc.code,
+                ) from exc
+            raise SZGConnectionError(
+                f"{method} {path} failed: HTTP {exc.code}",
+                status=exc.code,
+            ) from exc
+        except socket.timeout as exc:
+            raise SZGTimeoutError(f"{method} {path} timed out") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, socket.timeout):
+                raise SZGTimeoutError(f"{method} {path} timed out") from exc
+            raise SZGConnectionError(f"{method} {path} failed: {exc.reason}") from exc
 
     def _negotiate(self) -> dict[str, str]:
         """Get SignalR connection URL and access token."""
@@ -140,16 +176,16 @@ class SZGCloudSignalR:
                 data=payload,
             )
             _LOGGER.debug("open_cloud_async succeeded for %s", device_id)
-        except Exception as exc:
-            # CAT modules return 500 with "OK" which is normal.
-            # Log at debug so we can diagnose Saber/NGIX issues.
+        except AuthenticationError:
+            # Don't swallow auth errors — let the outer connect() loop
+            # surface them so the integration can trigger reauth.
+            raise
+        except (SZGConnectionError, SZGTimeoutError) as exc:
+            # CAT modules return 500 with "OK" which our HTTPError branch
+            # turns into SZGConnectionError; that's normal here. Saber/NGIX
+            # devices may legitimately fail (offline) — log at debug so we
+            # can still diagnose if needed without spamming warnings.
             _LOGGER.debug("open_cloud_async for %s: %s", device_id, exc)
-
-    def get_appliance(self, device_id: str) -> Appliance:
-        """Get or create an Appliance instance for a device."""
-        if device_id not in self._appliances:
-            self._appliances[device_id] = Appliance()
-        return self._appliances[device_id]
 
     async def connect(
         self,
@@ -164,7 +200,9 @@ class SZGCloudSignalR:
             callback: Called for each update with (device_id, msg_type, data).
                      msg_type 1 = full state, 2 = delta update.
                      For deltas, data contains {"props": {"key": value}}.
-                     Also updates the internal Appliance instances automatically.
+                     The library is stateless — callers retain their
+                     own Appliance instance and merge via
+                     ``Appliance.update_from_response``.
         """
         self._running = True
         retry_delay = 5
@@ -176,7 +214,13 @@ class SZGCloudSignalR:
                 consecutive_failures = 0
                 retry_delay = 5  # Reset on successful connection
                 await self._connect_and_listen(device_ids, callback)
-            except (websockets.exceptions.ConnectionClosed, ConnectionError) as exc:
+            except AuthenticationError:
+                # Auth failures are not recoverable by reconnecting — the
+                # caller (e.g. the HA integration) needs to drive a
+                # reauth flow. Re-raise to surface the condition.
+                self._running = False
+                raise
+            except (websockets.exceptions.ConnectionClosed, SZGConnectionError, SZGTimeoutError) as exc:
                 consecutive_failures += 1
                 _LOGGER.warning(
                     "SignalR connection lost (attempt %d): %s. Reconnecting in %ds...",
@@ -186,9 +230,9 @@ class SZGCloudSignalR:
                 retry_delay = min(retry_delay * 2, max_delay)
             except Exception as exc:
                 consecutive_failures += 1
-                _LOGGER.error(
-                    "SignalR error (attempt %d): %s. Reconnecting in %ds...",
-                    consecutive_failures, exc, retry_delay,
+                _LOGGER.exception(
+                    "Unexpected SignalR error (attempt %d). Reconnecting in %ds...",
+                    consecutive_failures, retry_delay,
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
@@ -211,12 +255,14 @@ class SZGCloudSignalR:
         # the WebSocket alive for pings — so we must reconnect before expiry.
         token_exp = _get_token_expiry(info["accessToken"])
         if token_exp:
+            self._token_expires_at = token_exp
             reconnect_at = token_exp - _TOKEN_REFRESH_MARGIN
             ttl = int(token_exp - time.time())
             _LOGGER.debug("SignalR token expires in %ds, will reconnect in %ds", ttl, ttl - _TOKEN_REFRESH_MARGIN)
         else:
             # Fallback: reconnect every 50 minutes if we can't read the token
             reconnect_at = time.time() + 3000
+            self._token_expires_at = reconnect_at + _TOKEN_REFRESH_MARGIN
             _LOGGER.debug("Could not read SignalR token expiry, will reconnect in 50min")
 
         # Pre-create SSL context in executor to avoid blocking the event loop
@@ -285,22 +331,19 @@ class SZGCloudSignalR:
                     msg_type = parsed["msg_type"]
                     data = parsed["data"]
 
-                    # Update internal appliance state
-                    appliance = self.get_appliance(device_id)
-                    if msg_type == 1:
-                        appliance.update_from_response(data)
-                    elif msg_type == 2:
-                        props = data.get("props", data)
-                        appliance.update_from_response(props)
-
-                    # Notify callback
+                    # Notify callback. The library does not retain
+                    # appliance state; the caller (e.g. the HA
+                    # coordinator) is responsible for routing the
+                    # delta into its own Appliance instance.
                     if callback:
                         try:
                             result = callback(device_id, msg_type, data)
                             if asyncio.iscoroutine(result):
                                 await result
-                        except Exception as exc:
-                            _LOGGER.error("Callback error: %s", exc)
+                        except Exception:
+                            _LOGGER.exception(
+                                "Callback error in SignalR handler"
+                            )
 
     async def disconnect(self) -> None:
         """Disconnect from SignalR."""

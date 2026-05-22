@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import logging
-import secrets
 import ssl
 import time
 import urllib.parse
 import urllib.request
 import urllib.error
-import webbrowser
 from dataclasses import dataclass
 from typing import Any
 
@@ -89,76 +86,21 @@ class SZGCloudAuth:
     Usage:
         auth = SZGCloudAuth()
 
-        # First time — opens browser for login:
-        tokens = auth.login()
+        # Construct the authorize URL and have the user log in via browser
+        # (see examples/cloud_login.py for the full interactive flow):
+        auth_url = auth.get_authorize_url(challenge, state)
 
-        # Subsequent calls — refreshes silently:
+        # Exchange the redirect code for tokens:
+        tokens = auth.exchange_code(code, verifier)
+
+        # Subsequent calls — refresh silently:
         tokens = auth.refresh(tokens)
 
-        # Or load/save from file:
+        # Load/save from file:
         auth.save_tokens(tokens, "tokens.json")
         tokens = auth.load_tokens("tokens.json")
         tokens = auth.ensure_valid(tokens)  # refreshes if expired
     """
-
-    def login(self, timeout: int = 120) -> TokenSet:
-        """Perform interactive browser-based login.
-
-        Opens the B2C login page in the user's default browser.
-        After login, the browser redirects to a custom scheme URL.
-        The user must copy this URL and save it to a file, or the
-        auth code can be provided directly.
-
-        For Home Assistant integration, use login_with_code() instead
-        after handling the redirect in the HA OAuth flow.
-        """
-        code_verifier = secrets.token_urlsafe(64)[:128]
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
-        state = secrets.token_urlsafe(32)
-
-        params = {
-            "client_id": CLIENT_ID,
-            "response_type": "code",
-            "redirect_uri": REDIRECT_URI,
-            "scope": SCOPES,
-            "state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "response_mode": "query",
-        }
-        auth_url = f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
-
-        _LOGGER.info("Opening browser for Sub-Zero login")
-        webbrowser.open(auth_url)
-
-        print("\nAfter logging in, the browser will redirect to a URL starting with:")
-        print(f"  {REDIRECT_URI}?code=...")
-        print("\nCopy the FULL URL and save it to: redirect_url.txt")
-        input("\nPress Enter once saved...")
-
-        try:
-            with open("redirect_url.txt", "r") as f:
-                redirect_url = f.read().strip()
-        except FileNotFoundError:
-            raise AuthenticationError("redirect_url.txt not found")
-
-        # Extract code
-        if "?" in redirect_url:
-            qs = redirect_url.split("?", 1)[1]
-            params = urllib.parse.parse_qs(qs)
-        else:
-            params = {}
-
-        if "error" in params:
-            raise AuthenticationError(params.get("error_description", params["error"])[0])
-
-        if "code" not in params:
-            raise AuthenticationError(f"No auth code in redirect URL")
-
-        code = params["code"][0]
-        return self.exchange_code(code, code_verifier)
 
     def exchange_code(self, code: str, code_verifier: str) -> TokenSet:
         """Exchange an authorization code for tokens."""

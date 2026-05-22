@@ -193,7 +193,6 @@ class Appliance:
     """Represents a Sub-Zero Group connected appliance and its current state."""
 
     # Identity
-    host: str = ""
     model: str = ""
     serial: str = ""
     name: str = ""

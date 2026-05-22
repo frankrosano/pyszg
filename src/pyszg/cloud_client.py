@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import ssl
 import uuid
 import urllib.request
@@ -13,7 +14,12 @@ from typing import Any
 from .appliance import Appliance
 from .cloud_auth import SZGCloudAuth, TokenSet
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
-from .exceptions import SZGError, AuthenticationError, CommandError
+from .exceptions import (
+    SZGConnectionError,
+    SZGTimeoutError,
+    AuthenticationError,
+    CommandError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +34,10 @@ class SZGCloudClient:
         from pyszg import SZGCloudAuth, SZGCloudClient
 
         auth = SZGCloudAuth()
-        tokens = auth.login()  # first time — opens browser
+        # First time: see examples/cloud_login.py for the interactive
+        # browser-paste flow that produces a TokenSet.
+        tokens = auth.load_tokens("cloud_tokens.json")
+        tokens = auth.ensure_valid(tokens)
 
         client = SZGCloudClient(tokens)
         devices = client.get_devices()
@@ -45,7 +54,6 @@ class SZGCloudClient:
     def __init__(self, tokens: TokenSet, auth: SZGCloudAuth | None = None):
         self._tokens = tokens
         self._auth = auth or SZGCloudAuth()
-        self._appliances: dict[str, Appliance] = {}
         self._ssl_context = ssl.create_default_context()
 
     @property
@@ -108,10 +116,15 @@ class SZGCloudClient:
                 # which the API gateway wraps as a 500 error
                 return {"_raw": "OK"}
             raise CommandError(msg, status=status)
-        except (AuthenticationError, CommandError):
-            raise
-        except Exception as exc:
-            raise SZGError(f"API request failed: {exc}")
+        except socket.timeout as exc:
+            raise SZGTimeoutError(f"Request to {path} timed out") from exc
+        except urllib.error.URLError as exc:
+            # Wraps connection refused, DNS failure, and (on some Python
+            # versions) socket.timeout. We've already handled the timeout
+            # case above; everything left here is a transport failure.
+            if isinstance(exc.reason, socket.timeout):
+                raise SZGTimeoutError(f"Request to {path} timed out") from exc
+            raise SZGConnectionError(f"Cannot reach {API_BASE}: {exc.reason}") from exc
 
     def get_devices(self) -> list[dict[str, Any]]:
         """List all appliances on the account.
@@ -155,19 +168,18 @@ class SZGCloudClient:
     def get_appliance_state(self, device_id: str) -> Appliance:
         """Get the current state of an appliance via cloud.
 
-        Returns an Appliance object with parsed state, same as
-        the local SZGClient.refresh() method.
+        Returns a fresh Appliance object with parsed state. Callers that
+        need to merge deltas across calls should hold their own Appliance
+        instance and call ``update_from_response`` on it; this client is
+        stateless.
 
         Uses 'get' command for CAT modules and 'get_async' for
         Saber/NGIX modules (which respond differently).
         """
+        appliance = Appliance()
+
         # Try 'get' first (works for all module types)
         resp = self.send_command(device_id, "get")
-
-        if device_id not in self._appliances:
-            self._appliances[device_id] = Appliance()
-
-        appliance = self._appliances[device_id]
 
         # CAT modules return "OK" wrapper for some commands
         if "_raw" in resp:
