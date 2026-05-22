@@ -116,8 +116,15 @@ class SZGCloudSignalR:
         After the token expires Azure stops routing appliance messages
         even though the WebSocket itself stays open, so this property
         returns False once the cached expiry is reached.
+
+        We don't peek at websocket-library internals to detect "open" —
+        the library's protocol-state attribute name has changed across
+        versions (legacy ``.closed`` -> ``state`` enum). Instead the
+        SignalR runner clears ``self._ws`` whenever the connection
+        context exits, so ``self._ws is not None`` is the authoritative
+        signal here.
         """
-        if self._ws is None or self._ws.closed:
+        if self._ws is None:
             return False
         if self._token_expires_at and time.time() >= self._token_expires_at:
             return False
@@ -269,81 +276,97 @@ class SZGCloudSignalR:
         ssl_context = await loop.run_in_executor(None, ssl.create_default_context)
 
         _LOGGER.info("Connecting to SignalR...")
-        async with websockets.connect(
-            ws_url,
-            ssl=ssl_context,
-            ping_interval=20,
-            ping_timeout=10,
-        ) as ws:
-            self._ws = ws
+        try:
+            async with websockets.connect(
+                ws_url,
+                ssl=ssl_context,
+                ping_interval=20,
+                ping_timeout=10,
+            ) as ws:
+                self._ws = ws
+                await self._listen(ws, reconnect_at, device_ids, callback)
+        finally:
+            # Always clear the handle so is_connected stops returning True
+            # the moment the connection context exits, regardless of why.
+            self._ws = None
 
-            # Handshake
-            await ws.send(json.dumps({"protocol": "json", "version": 1}) + RECORD_SEP)
-            await asyncio.wait_for(ws.recv(), timeout=10)
-            _LOGGER.info("SignalR connected")
+    async def _listen(
+        self,
+        ws: Any,
+        reconnect_at: float,
+        device_ids: list[str] | None,
+        callback: Callable | None,
+    ) -> None:
+        """Run the WebSocket handshake + listen loop while the connection is open."""
+        loop = asyncio.get_event_loop()
 
-            # Open async channels (blocking HTTP calls, run in executor)
-            ids_to_open = device_ids
-            if not ids_to_open:
+        # Handshake
+        await ws.send(json.dumps({"protocol": "json", "version": 1}) + RECORD_SEP)
+        await asyncio.wait_for(ws.recv(), timeout=10)
+        _LOGGER.info("SignalR connected")
+
+        # Open async channels (blocking HTTP calls, run in executor)
+        ids_to_open = device_ids
+        if not ids_to_open:
+            try:
+                resp = await loop.run_in_executor(
+                    None, self._api_request, "GET", "/consumerapp/user/devices"
+                )
+                ids_to_open = [dev["id"] for dev in resp.get("devices", [])]
+            except Exception as exc:
+                _LOGGER.warning("Failed to get device list: %s", exc)
+                ids_to_open = []
+
+        for dev_id in ids_to_open:
+            await loop.run_in_executor(None, self._open_cloud_async, dev_id)
+
+        # Listen loop — exits when token is about to expire
+        while self._running:
+            if time.time() >= reconnect_at:
+                _LOGGER.debug("SignalR token expiring soon, reconnecting with fresh token")
+                return  # Clean exit — outer loop will reconnect
+
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                continue
+
+            for part in raw.split(RECORD_SEP):
+                part = part.strip()
+                if not part:
+                    continue
                 try:
-                    resp = await loop.run_in_executor(
-                        None, self._api_request, "GET", "/consumerapp/user/devices"
-                    )
-                    ids_to_open = [dev["id"] for dev in resp.get("devices", [])]
-                except Exception as exc:
-                    _LOGGER.warning("Failed to get device list: %s", exc)
-                    ids_to_open = []
-
-            for dev_id in ids_to_open:
-                await loop.run_in_executor(None, self._open_cloud_async, dev_id)
-
-            # Listen loop — exits when token is about to expire
-            while self._running:
-                if time.time() >= reconnect_at:
-                    _LOGGER.debug("SignalR token expiring soon, reconnecting with fresh token")
-                    return  # Clean exit — outer loop will reconnect
-
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=30)
-                except asyncio.TimeoutError:
+                    msg = json.loads(part)
+                except json.JSONDecodeError:
                     continue
 
-                for part in raw.split(RECORD_SEP):
-                    part = part.strip()
-                    if not part:
-                        continue
+                # Respond to pings
+                if msg.get("type") == 6:
+                    await ws.send(json.dumps({"type": 6}) + RECORD_SEP)
+                    continue
+
+                # Parse appliance message
+                parsed = _parse_signalr_message(msg)
+                if not parsed:
+                    continue
+
+                device_id = parsed["device_id"]
+                msg_type = parsed["msg_type"]
+                data = parsed["data"]
+
+                # Notify callback. The library does not retain
+                # appliance state; the caller (e.g. the HA
+                # coordinator) is responsible for routing the
+                # delta into its own Appliance instance.
+                if callback:
                     try:
-                        msg = json.loads(part)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Respond to pings
-                    if msg.get("type") == 6:
-                        await ws.send(json.dumps({"type": 6}) + RECORD_SEP)
-                        continue
-
-                    # Parse appliance message
-                    parsed = _parse_signalr_message(msg)
-                    if not parsed:
-                        continue
-
-                    device_id = parsed["device_id"]
-                    msg_type = parsed["msg_type"]
-                    data = parsed["data"]
-
-                    # Notify callback. The library does not retain
-                    # appliance state; the caller (e.g. the HA
-                    # coordinator) is responsible for routing the
-                    # delta into its own Appliance instance.
-                    if callback:
-                        try:
-                            result = callback(device_id, msg_type, data)
-                            if asyncio.iscoroutine(result):
-                                await result
-                        except Exception:
-                            _LOGGER.exception(
-                                "Callback error in SignalR handler"
-                            )
+                        result = callback(device_id, msg_type, data)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        _LOGGER.exception(
+                            "Callback error in SignalR handler"
+                        )
 
     async def disconnect(self) -> None:
         """Disconnect from SignalR."""
