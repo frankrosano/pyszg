@@ -314,7 +314,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     `raw` dict compares value-wise.)
   - _Requirements: 5.1_
 
-- [-] 14. Bump the pyszg pin in the integration manifest
+- [x] 14. Bump the pyszg pin in the integration manifest
   - In `szg-hass/custom_components/szg/manifest.json`, change the
     `requirements` entry from
     `pyszg@git+https://github.com/frankrosano/pyszg.git` to a
@@ -327,7 +327,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
 
 ## Phase 2 — Reauth flow, sensor classes, options migration
 
-- [ ] 15. Extract a shared login-form helper and add reauth steps
+- [x] 15. Extract a shared login-form helper and add reauth steps
   - Refactor `SZGConfigFlow.async_step_user` so the form rendering
     (PKCE-pair generation, `auth_url` derivation, `async_show_form`
     call) lives in a `_show_login_form(step_id, errors=None)` helper.
@@ -346,7 +346,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     `self.async_update_reload_and_abort(entry, data={...})`.
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
 
-- [ ] 16. Add reauth strings and translations
+- [x] 16. Add reauth strings and translations
   - In `strings.json`, add a `config.step.reauth_confirm` block with
     `title`, `description` (mirroring the user step but framing it
     as reauth), and `data.redirect_url` field label.
@@ -357,7 +357,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
   - Mirror all of the above into `translations/en.json`.
   - _Requirements: 7.6_
 
-- [ ] 17. Convert wash-cycle and wash-status sensors to ENUM device class
+- [x] 17. Convert wash-cycle and wash-status sensors to ENUM device class
   - In `sensor.py`, on `SZGWashCycleSensor` set
     `_attr_device_class = SensorDeviceClass.ENUM` and
     `_attr_options = [<each WashCycle name title-cased>]`.
@@ -369,7 +369,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     integers would otherwise violate the ENUM contract).
   - _Requirements: 8.1, 8.2, 8.5_
 
-- [ ] 18. Convert connection-mode and live-reporting sensors to ENUM
+- [x] 18. Convert connection-mode and live-reporting sensors to ENUM
   - In `sensor.py`, on `SZGConnectionModeSensor` set
     `_attr_device_class = SensorDeviceClass.ENUM`,
     `_attr_options = ["Local", "Cloud"]`,
@@ -384,7 +384,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     entries for each option.
   - _Requirements: 8.3, 8.4, 8.5, 8.6_
 
-- [ ] 19. Add a service-required binary sensor to every appliance
+- [x] 19. Add a service-required binary sensor to every appliance
   - In `binary_sensor.py`, move the existing
     `SZGBinarySensor(coordinator, conn, "service_required", "Service Required", BinarySensorDeviceClass.PROBLEM, diagnostic=True)`
     creation out of the `REFRIGERATOR` branch and add it
@@ -393,7 +393,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     refrigerator entities are not duplicated by the registry.
   - _Requirements: 9.1, 9.2_
 
-- [ ] 20. Migrate device PINs from entry.data to entry.options
+- [x] 20. Migrate device PINs from entry.data to entry.options
   - Set `SZGConfigFlow.VERSION = 2`.
   - Add an `async_migrate_entry(hass, entry)` function in
     `__init__.py` that handles `entry.version < 2` by:
@@ -416,7 +416,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     holds `device_pins` and `entry.data` does not.
   - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6_
 
-- [ ] 21. Update the integration README to mention reauth
+- [x] 21. Update the integration README to mention reauth
   - In `szg-hass/README.md`, add a sentence under "Installation" or
     a new "Account Maintenance" subsection noting that if your
     Sub-Zero password changes or your account is logged out, HA will
@@ -425,7 +425,7 @@ Phase 1 (library)              Phase 1 (integration)         Phase 2
     is preserved.
   - _Requirements: 13.4_
 
-- [ ] 22. Bump pyszg pin and tag phase 2
+- [x] 22. Bump pyszg pin and tag phase 2
   - Tag the post-phase-2 `pyszg` commit (no library changes are
     expected in phase 2; this is just a convenience tag).
   - Update the pin in `szg-hass/custom_components/szg/manifest.json`
