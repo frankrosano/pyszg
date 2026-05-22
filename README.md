@@ -124,8 +124,9 @@ Under the hood:
 
 1. The script opens the Sub-Zero login page in your browser.
 2. Log in with your Sub-Zero Owner's App credentials.
-3. The browser redirects to a URL starting with `msauth.com.subzero.group.owners.app://auth?code=...` (browsers can't resolve this scheme — they show an error page; that's expected).
-4. Copy the full redirect URL from the address bar into `redirect_url.txt`, then press Enter in the terminal.
+3. The browser tries to redirect to a URL starting with `msauth.com.subzero.group.owners.app://auth?code=...` but browsers can't resolve that scheme. The page won't load — that's expected.
+4. Open developer tools (F12 or Cmd+Option+I) → **Console** tab. The blocked navigation logs there with the full redirect URL.
+5. Copy that URL into `redirect_url.txt`, then press Enter in the terminal.
 5. The script exchanges the code via `SZGCloudAuth.exchange_code` and writes the resulting tokens to disk.
 6. Subsequent calls use `auth.ensure_valid()` to silently refresh — no browser needed.
 

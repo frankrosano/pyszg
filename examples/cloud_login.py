@@ -15,10 +15,12 @@ Usage:
 The script:
     1. Generates a PKCE verifier/challenge pair.
     2. Opens the Sub-Zero login page in your default browser.
-    3. Waits for you to paste the redirect URL into ``redirect_url.txt``
-       (the redirect target uses a custom URL scheme that browsers can't
-       resolve, so they show an error page — that's normal).
-    4. Exchanges the code for tokens and writes them to the tokens file.
+    3. Tells you to open developer tools (Console tab) and watch for the
+       blocked navigation to ``msauth.com.subzero.group.owners.app://auth?code=...``.
+       The redirect won't load in the browser — the URL only appears in
+       the console.
+    4. Waits for you to paste that URL into ``redirect_url.txt``.
+    5. Exchanges the code for tokens and writes them to the tokens file.
 """
 
 from __future__ import annotations
@@ -51,10 +53,13 @@ def login_interactive(auth: SZGCloudAuth, redirect_url_file: str = "redirect_url
     webbrowser.open(auth_url)
 
     print()
-    print("After logging in, the browser will redirect to a URL starting with:")
+    print("Open developer tools in your browser (F12 or Cmd+Option+I) and switch")
+    print("to the Console tab BEFORE clicking the login link. Sub-Zero's redirect")
+    print(f"goes to a URL starting with:")
     print(f"  {REDIRECT_URI}?code=...")
-    print()
-    print(f"Copy the FULL URL from the address bar and save it to: {redirect_url_file}")
+    print("which browsers can't open. The blocked navigation logs in the Console")
+    print("with the full URL — copy that and save it to:")
+    print(f"  {redirect_url_file}")
     input("Press Enter once saved...")
 
     redirect_path = Path(redirect_url_file)
