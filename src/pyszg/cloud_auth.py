@@ -6,12 +6,13 @@ import base64
 import json
 import logging
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .cloud_const import (
     CLIENT_ID, REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
@@ -189,3 +190,86 @@ class SZGCloudAuth:
         """Load tokens from a JSON file."""
         with open(path) as f:
             return TokenSet.from_dict(json.load(f))
+
+
+class TokenStore:
+    """Thread-safe shared holder for an OAuth ``TokenSet``.
+
+    Solves two problems:
+
+    1. **Persistence on rotation.** Azure AD B2C rotates the refresh
+       token on every refresh and invalidates the previous one. If the
+       rotated tokens aren't written back to durable storage, the next
+       process start (HA restart, daemon restart) tries to refresh with
+       a stale refresh_token and gets a 401, forcing reauth. The
+       ``on_refresh`` callback fires after every successful refresh so
+       the caller can persist the new tokens.
+
+    2. **Single source of truth across clients.** A single ``TokenStore``
+       can be shared by ``SZGCloudClient`` and ``SZGCloudSignalR`` so
+       they observe the same rotation in lockstep. Without this, each
+       client holds its own ``TokenSet``; whichever refreshes first
+       invalidates the refresh_token the other still has cached, and
+       the loser will fail on its next refresh attempt within the same
+       process.
+
+    The store is thread-safe — refresh is serialized with an internal
+    lock so concurrent callers from executor threads (cloud client and
+    SignalR negotiate / open_cloud_async calls) don't race.
+
+    The ``on_refresh`` callback runs while the refresh lock is held, so
+    keep it short. If the consumer needs to do async work (e.g.,
+    schedule an HA config-entry update on the event loop), it should
+    schedule that work and return immediately rather than block.
+    """
+
+    def __init__(
+        self,
+        tokens: TokenSet,
+        auth: SZGCloudAuth | None = None,
+        on_refresh: Callable[[TokenSet], None] | None = None,
+    ) -> None:
+        self._tokens = tokens
+        self._auth = auth or SZGCloudAuth()
+        self._on_refresh = on_refresh
+        self._lock = threading.Lock()
+
+    @property
+    def tokens(self) -> TokenSet:
+        """Current tokens (may be expired — call ``get_valid()`` to refresh)."""
+        return self._tokens
+
+    @property
+    def auth(self) -> SZGCloudAuth:
+        return self._auth
+
+    def get_valid(self) -> TokenSet:
+        """Return current tokens, refreshing first if they're expired.
+
+        Thread-safe: at most one refresh happens at a time. After a
+        successful refresh, the ``on_refresh`` callback (if set) is
+        invoked with the new ``TokenSet`` so the caller can persist
+        the rotated refresh_token. Exceptions raised by the callback
+        are logged and swallowed: the in-memory tokens remain valid
+        for the running process even if persistence failed. The next
+        process start may fall back to reauth, but the current process
+        keeps working.
+        """
+        with self._lock:
+            if not self._tokens.is_expired:
+                return self._tokens
+
+            _LOGGER.info("Token expired, refreshing")
+            new_tokens = self._auth.refresh(self._tokens)
+            self._tokens = new_tokens
+
+            if self._on_refresh is not None:
+                try:
+                    self._on_refresh(new_tokens)
+                except Exception:
+                    _LOGGER.exception(
+                        "TokenStore on_refresh callback failed; "
+                        "rotated tokens may not be persisted"
+                    )
+
+            return new_tokens

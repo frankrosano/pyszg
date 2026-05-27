@@ -9,7 +9,7 @@ import asyncio
 import os
 import signal
 import sys
-from pyszg import SZGCloudAuth, SZGCloudSignalR
+from pyszg import SZGCloudAuth, SZGCloudSignalR, TokenStore
 
 TOKEN_FILE = "cloud_tokens.json"
 
@@ -32,17 +32,21 @@ async def main():
 
     if os.path.exists(TOKEN_FILE) and "--reauth" not in sys.argv:
         tokens = auth.load_tokens(TOKEN_FILE)
-        tokens = auth.ensure_valid(tokens)
-        auth.save_tokens(tokens, TOKEN_FILE)
     else:
         from cloud_login import login_interactive
         tokens = login_interactive(auth)
         auth.save_tokens(tokens, TOKEN_FILE)
 
+    store = TokenStore(
+        tokens,
+        auth,
+        on_refresh=lambda new_tokens: auth.save_tokens(new_tokens, TOKEN_FILE),
+    )
+
     print(f"Authenticated as: {tokens.name}")
     print(f"Listening for real-time updates (Ctrl+C to stop)...\n")
 
-    signalr = SZGCloudSignalR(tokens, auth)
+    signalr = SZGCloudSignalR(store)
 
     loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGINT, lambda: asyncio.ensure_future(signalr.disconnect()))

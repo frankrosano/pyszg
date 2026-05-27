@@ -28,6 +28,7 @@ from pyszg import (
     SZGConnectionError,
     SZGTimeoutError,
     TokenSet,
+    TokenStore,
 )
 
 
@@ -39,8 +40,7 @@ def _client() -> SZGCloudClient:
         user_id="user-1",
         expires_at=2_000_000_000,  # far in the future, no refresh
     )
-    auth = SZGCloudAuth()
-    return SZGCloudClient(tokens, auth)
+    return SZGCloudClient(TokenStore(tokens, SZGCloudAuth()))
 
 
 def _http_error(status: int, body: str = "") -> urllib.error.HTTPError:

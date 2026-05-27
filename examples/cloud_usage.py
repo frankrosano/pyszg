@@ -14,7 +14,7 @@ Force re-login:
 import json
 import os
 import sys
-from pyszg import SZGCloudAuth, SZGCloudClient, ApplianceType
+from pyszg import SZGCloudAuth, SZGCloudClient, ApplianceType, TokenStore
 
 TOKEN_FILE = "cloud_tokens.json"
 
@@ -26,19 +26,25 @@ def main():
     if os.path.exists(TOKEN_FILE) and "--reauth" not in sys.argv:
         print("Loading saved tokens...")
         tokens = auth.load_tokens(TOKEN_FILE)
-        tokens = auth.ensure_valid(tokens)
-        auth.save_tokens(tokens, TOKEN_FILE)
     else:
         print("Starting browser login...")
         from cloud_login import login_interactive
         tokens = login_interactive(auth)
         auth.save_tokens(tokens, TOKEN_FILE)
 
+    # Wrap in a TokenStore so any rotated refresh tokens are saved
+    # back to disk automatically.
+    store = TokenStore(
+        tokens,
+        auth,
+        on_refresh=lambda new_tokens: auth.save_tokens(new_tokens, TOKEN_FILE),
+    )
+
     print(f"Authenticated as: {tokens.name} ({tokens.email})")
     print(f"User ID: {tokens.user_id}\n")
 
     # Create cloud client
-    client = SZGCloudClient(tokens, auth)
+    client = SZGCloudClient(store)
 
     # List devices
     print("=== Registered Appliances ===")

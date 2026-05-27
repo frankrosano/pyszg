@@ -12,7 +12,7 @@ import urllib.error
 from typing import Any
 
 from .appliance import Appliance
-from .cloud_auth import SZGCloudAuth, TokenSet
+from .cloud_auth import TokenSet, TokenStore
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
 from .exceptions import (
     SZGConnectionError,
@@ -30,16 +30,25 @@ class SZGCloudClient:
     Provides access to all appliances on the account, including newer
     NGIX/Saber modules that don't support direct IP control.
 
-    Usage:
-        from pyszg import SZGCloudAuth, SZGCloudClient
+    Construct via a shared ``TokenStore`` so cloud REST and SignalR
+    refresh in lockstep and rotated refresh tokens are persisted via
+    the store's ``on_refresh`` callback::
+
+        store = TokenStore(tokens, auth, on_refresh=save_to_disk)
+        client = SZGCloudClient(store)
+        signalr = SZGCloudSignalR(store)
+
+    Usage::
+
+        from pyszg import SZGCloudAuth, SZGCloudClient, TokenStore
 
         auth = SZGCloudAuth()
         # First time: see examples/cloud_login.py for the interactive
         # browser-paste flow that produces a TokenSet.
         tokens = auth.load_tokens("cloud_tokens.json")
-        tokens = auth.ensure_valid(tokens)
+        store = TokenStore(tokens, auth)
 
-        client = SZGCloudClient(tokens)
+        client = SZGCloudClient(store)
         devices = client.get_devices()
         for dev in devices:
             print(dev["id"], dev["applianceId"])
@@ -51,24 +60,27 @@ class SZGCloudClient:
         client.send_command("00068002fc90", "set", {"ref_set_temp": 37})
     """
 
-    def __init__(self, tokens: TokenSet, auth: SZGCloudAuth | None = None):
-        self._tokens = tokens
-        self._auth = auth or SZGCloudAuth()
+    def __init__(self, store: TokenStore):
+        self._store = store
         self._ssl_context = ssl.create_default_context()
 
     @property
     def tokens(self) -> TokenSet:
-        return self._tokens
+        """Current tokens. Read this if you need the live id_token or
+        user_id; the store handles refresh and rotation automatically.
+        """
+        return self._store.tokens
+
+    @property
+    def token_store(self) -> TokenStore:
+        """The shared token store. Pass this to ``SZGCloudSignalR`` so
+        both clients refresh the same tokens.
+        """
+        return self._store
 
     @property
     def user_id(self) -> str:
-        return self._tokens.user_id
-
-    def _ensure_auth(self) -> None:
-        """Refresh tokens if expired."""
-        if self._tokens.is_expired:
-            _LOGGER.info("Token expired, refreshing")
-            self._tokens = self._auth.refresh(self._tokens)
+        return self._store.tokens.user_id
 
     def _request(
         self,
@@ -77,14 +89,14 @@ class SZGCloudClient:
         data: dict[str, Any] | None = None,
     ) -> Any:
         """Make an authenticated API request."""
-        self._ensure_auth()
+        tokens = self._store.get_valid()
 
         url = f"{API_BASE}{path}"
         headers = {
-            "Authorization": f"Bearer {self._tokens.id_token}",
+            "Authorization": f"Bearer {tokens.id_token}",
             "Ocp-Apim-Subscription-Key": SUBSCRIPTION_KEY,
             "Content-Type": "application/json",
-            "Userid": self._tokens.user_id,
+            "Userid": tokens.user_id,
         }
 
         body = json.dumps(data).encode() if data else None

@@ -42,7 +42,7 @@ def dump_local(host, pin=None):
 
 
 def dump_cloud(device_id=None):
-    from pyszg import SZGCloudAuth, SZGCloudClient
+    from pyszg import SZGCloudAuth, SZGCloudClient, TokenStore
 
     token_file = "cloud_tokens.json"
     if not os.path.exists(token_file):
@@ -51,10 +51,13 @@ def dump_cloud(device_id=None):
 
     auth = SZGCloudAuth()
     tokens = auth.load_tokens(token_file)
-    tokens = auth.ensure_valid(tokens)
-    auth.save_tokens(tokens, token_file)
+    store = TokenStore(
+        tokens,
+        auth,
+        on_refresh=lambda new_tokens: auth.save_tokens(new_tokens, token_file),
+    )
 
-    client = SZGCloudClient(tokens, auth)
+    client = SZGCloudClient(store)
     devices = client.get_devices()
 
     targets = devices

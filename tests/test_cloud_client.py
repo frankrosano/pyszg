@@ -22,6 +22,7 @@ from pyszg import (
     SZGCloudAuth,
     SZGCloudClient,
     TokenSet,
+    TokenStore,
 )
 
 
@@ -32,7 +33,7 @@ def _client() -> SZGCloudClient:
         user_id="user-1",
         expires_at=2_000_000_000,
     )
-    return SZGCloudClient(tokens, SZGCloudAuth())
+    return SZGCloudClient(TokenStore(tokens, SZGCloudAuth()))
 
 
 def _ok_response(body: dict | str) -> MagicMock:

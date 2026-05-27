@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import websockets
 
-from .cloud_auth import SZGCloudAuth, TokenSet
+from .cloud_auth import TokenStore
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
 from .exceptions import (
     SZGConnectionError,
@@ -84,14 +84,15 @@ class SZGCloudSignalR:
     Connects to the Sub-Zero cloud SignalR hub and receives instant
     state change notifications for all appliances on the account.
 
-    Usage:
-        from pyszg import SZGCloudAuth, SZGCloudSignalR
+    Usage::
+
+        from pyszg import SZGCloudAuth, SZGCloudSignalR, TokenStore
 
         auth = SZGCloudAuth()
         tokens = auth.load_tokens("tokens.json")
-        tokens = auth.ensure_valid(tokens)
+        store = TokenStore(tokens, auth)  # share with SZGCloudClient
 
-        signalr = SZGCloudSignalR(tokens, auth)
+        signalr = SZGCloudSignalR(store)
 
         async def on_update(device_id, msg_type, data):
             if msg_type == 2:  # delta
@@ -101,12 +102,18 @@ class SZGCloudSignalR:
         await signalr.connect(callback=on_update)
     """
 
-    def __init__(self, tokens: TokenSet, auth: SZGCloudAuth | None = None):
-        self._tokens = tokens
-        self._auth = auth or SZGCloudAuth()
+    def __init__(self, store: TokenStore):
+        self._store = store
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._running = False
         self._token_expires_at: float = 0.0
+
+    @property
+    def token_store(self) -> TokenStore:
+        """Shared token store. Pass this same store to ``SZGCloudClient``
+        so both clients refresh tokens in lockstep.
+        """
+        return self._store
 
     @property
     def is_connected(self) -> bool:
@@ -130,18 +137,14 @@ class SZGCloudSignalR:
             return False
         return True
 
-    def _ensure_auth(self) -> None:
-        if self._tokens.is_expired:
-            self._tokens = self._auth.refresh(self._tokens)
-
     def _api_request(self, method: str, path: str, data: Any = None,
                      lowercase_userid: bool = False) -> Any:
         """Make an authenticated API request. Must be called from executor thread."""
-        self._ensure_auth()
+        tokens = self._store.get_valid()
         url = f"{API_BASE}{path}"
-        uid = self._tokens.user_id.lower() if lowercase_userid else self._tokens.user_id
+        uid = tokens.user_id.lower() if lowercase_userid else tokens.user_id
         headers = {
-            "Authorization": f"Bearer {self._tokens.id_token}",
+            "Authorization": f"Bearer {tokens.id_token}",
             "Ocp-Apim-Subscription-Key": SUBSCRIPTION_KEY,
             "Content-Type": "application/json",
             "Userid": uid,
