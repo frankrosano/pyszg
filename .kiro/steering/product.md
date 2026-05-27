@@ -24,6 +24,8 @@ The `ModuleGeneration` enum in `appliance.py` is parsed from the `applianceId` s
 
 ## Design intent
 
-- **One unified `Appliance` model** across all transports — both local and cloud responses funnel through `Appliance.update_from_response()`.
-- **Transports do not auto-fall-back inside `pyszg`**. The library exposes them as separate clients; HA-level fallback logic lives in `szg-hass/coordinator.py`.
+- **One unified `Appliance` model** across all transports — both local and cloud responses funnel through `Appliance.update_from_response()`. Cloud responses come back as fresh `Appliance` objects from REST and as raw `props` dicts from SignalR; in both cases the consumer is responsible for merging into its own retained state.
+- **The library is stateless.** Cloud clients don't cache `Appliance` instances. The HA coordinator (and example scripts) hold the state of record and merge deltas into it. Don't reintroduce caches inside `pyszg` — it makes refresh semantics across two clients (REST + SignalR) ambiguous.
+- **Transports do not auto-fall-back inside `pyszg`.** The library exposes them as separate clients; HA-level fallback logic lives in `szg-hass/coordinator.py`.
+- **`TokenStore` is the cloud-token contract.** `SZGCloudClient` and `SZGCloudSignalR` both take a `TokenStore` (not a raw `TokenSet`) so they share rotation. Azure AD B2C invalidates the previous refresh_token on every refresh, so persistence has to happen on rotation, not at process exit — the `on_refresh` callback is the supported hook for that. Consumers that don't share a store across clients **will** lose tokens on the next process restart.
 - The auth flow is interactive on first run and silent thereafter via refresh token. Sub-Zero's OAuth client registers only custom-scheme redirect URIs that browsers can't open, so the user has to grab the redirect URL from the **DevTools Console** (where the blocked navigation is logged) and paste it back. `examples/cloud_login.py` drives the CLI version of this flow; production consumers (the HA integration's config flow) drive the same flow in-app using `SZGCloudAuth.get_authorize_url` + `exchange_code` directly.

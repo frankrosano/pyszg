@@ -55,14 +55,35 @@ If `uv` is not available, fall back to `pip3 install --break-system-packages -e 
 
 - `from __future__ import annotations` at the top of every module.
 - Type hints everywhere; PEP 604 union syntax (`str | None`).
-- Public exceptions all derive from `SZGError`. Re-export `SZGConnectionError` as `ConnectionError` alias for ergonomics.
+- Public exceptions all derive from `SZGError`. There is **no `ConnectionError` alias** — use `SZGConnectionError` directly. (The alias existed pre-0.2.0 and was dropped to avoid shadowing the builtin.)
 - Enums are `IntEnum` (matches the wire protocol's integer codes for cook modes, wash cycles, etc.).
 - Constants like `TEMP_RANGE_FRIDGE` live alongside the model they describe (`appliance.py`), not in a separate `const.py`.
 - Public surface is whatever is listed in `src/pyszg/__init__.py.__all__`. Keep it in sync.
 
+## Exception hierarchy and HA classification
+
+The hierarchy is small on purpose; the docstring in `exceptions.py` is the contract:
+
+| Exception | When it's raised | HA consumer maps to |
+|---|---|---|
+| `AuthenticationError` | PIN rejected (local) or HTTP 401 (cloud) | `ConfigEntryAuthFailed` → reauth flow |
+| `SZGConnectionError` | Cannot reach the appliance / cloud (refused, DNS, transport) | `ConfigEntryNotReady` / `UpdateFailed` |
+| `SZGTimeoutError` | Request timed out waiting for a response | `ConfigEntryNotReady` / `UpdateFailed` |
+| `CommandError` | Appliance or cloud rejected the command (HTTP 4xx/5xx other than 401) | Entity unavailable / log warning |
+
+`SZGCloudClient._request` and `SZGCloudSignalR._api_request` are the canonical examples of how to map `urllib.error.HTTPError` / `socket.timeout` / `urllib.error.URLError` into this hierarchy. Don't invent new mapping logic in callers.
+
+## Library architecture (post-0.3.0)
+
+- **Stateless transports.** Neither `SZGCloudClient` nor `SZGCloudSignalR` retains an `Appliance` cache. Each call returns a fresh `Appliance` (REST) or fires a callback with a delta (SignalR). Callers (the HA coordinator, examples) hold their own `Appliance` instance and merge updates via `Appliance.update_from_response`. Don't reintroduce caches in the library.
+- **`TokenStore` is the persistence boundary for OAuth tokens.** `SZGCloudClient` and `SZGCloudSignalR` both require a `TokenStore` (single positional arg) — the legacy `(TokenSet, auth)` constructors were removed in 0.3.0. Callers wrap their `TokenSet` once and pass the *same* store to both clients. The store's `on_refresh` callback fires after every successful refresh; that's where rotated refresh tokens get written back to disk / the HA config entry. Refresh is serialized under a lock, so concurrent executor-thread refreshes share one rotation instead of racing.
+- **`SZGCloudSignalR.is_connected` is two-fold.** It returns False if either the WebSocket handle is `None` *or* the SignalR access token (1h lifetime, separate from the OAuth id_token) has expired. Azure SignalR keeps the socket alive for pings even after stopping appliance message routing, so the expiry check is what makes the property honest.
+
 ## Protocol gotchas (worth knowing before changing transport code)
 
 - Local TLS uses a **self-signed cert and TLS 1.3**; verification is disabled. Do not "fix" this.
-- SignalR negotiate requires the userId to be **lowercased** before the POST.
+- SignalR negotiate requires the userId to be **lowercased** before the POST. The cloud REST API uses the original case. Both are enforced inside `SZGCloudSignalR._api_request` via the `lowercase_userid` flag.
 - Push updates are **delta-only** — `props` contains only changed keys. Always merge into existing state via `Appliance.update_from_response`.
 - The local connection has two modes: single-shot (one command, close) and persistent (after `unlock` + `get_async`, the socket stays open and receives push frames). Don't mix them.
+- The CAT cloud direct method returns the literal string `"OK"` wrapped in an HTTP 500. `_request` recognizes `(500, "OK")` and translates it to a successful `{"_raw": "OK"}` response. Don't strip that special case — it'll break refrigerator state reads.
+- SignalR access token (1h) and OAuth id_token are independent. The connect loop reads the SignalR JWT's `exp` claim and reconnects ~5 min before expiry; `AuthenticationError` from the inner loop is re-raised (not retried) so the caller can trigger reauth.
