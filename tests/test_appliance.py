@@ -328,3 +328,48 @@ def test_parse_dishwasher_response():
     assert a.cavity1.temp == 0
     assert a.fridge.set_temp is None
     assert a.ice_maker_on is None
+
+
+# --- Enum UNKNOWN fallbacks (via _missing_) -----------------------------
+
+from pyszg.appliance import CookMode, WashCycle, WashStatus
+
+
+def test_cook_mode_unknown_fallback():
+    assert CookMode(0) == CookMode.OFF
+    assert CookMode(13) == CookMode.ECO
+    # Unrecognized values resolve to UNKNOWN instead of raising ValueError.
+    assert CookMode(999) == CookMode.UNKNOWN
+    # 14 used to be the UNKNOWN sentinel; it's no longer a real member.
+    assert CookMode(14) == CookMode.UNKNOWN
+    # Sentinel is out-of-band so it can't collide with a real wire code.
+    assert CookMode.UNKNOWN.value == -1
+
+
+def test_wash_cycle_unknown_fallback():
+    assert WashCycle(2) == WashCycle.NORMAL
+    assert WashCycle(99) == WashCycle.UNKNOWN
+    assert WashCycle.UNKNOWN.value == -1
+
+
+def test_wash_status_unknown_fallback():
+    assert WashStatus(2) == WashStatus.RUNNING
+    assert WashStatus(99) == WashStatus.UNKNOWN
+    assert WashStatus.UNKNOWN.value == -1
+
+
+# --- Delta merge semantics ----------------------------------------------
+
+
+def test_delta_update_preserves_prior_state():
+    """A partial (delta) update must merge, not wipe, prior state."""
+    a = Appliance()
+    a.update_from_response(FRIDGE_RESPONSE)
+    assert a.fridge.set_temp == 38
+    assert a.ice_maker_on is True
+
+    a.update_from_response({"ref_set_temp": 40})
+
+    assert a.fridge.set_temp == 40          # changed prop applied
+    assert a.ice_maker_on is True           # untouched prop preserved
+    assert a.raw["appliance_model"] == "317"  # raw dict merged, not replaced

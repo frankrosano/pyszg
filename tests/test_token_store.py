@@ -184,3 +184,47 @@ def test_signalr_shares_tokenstore_with_client():
     signalr = SZGCloudSignalR(store)
 
     assert client.token_store is signalr.token_store
+
+
+# --- force_refresh ------------------------------------------------------
+
+
+def test_force_refresh_refreshes_even_when_not_expired():
+    auth = MagicMock(spec=SZGCloudAuth)
+    rotated = _rotated_tokens()
+    auth.refresh.return_value = rotated
+
+    store = TokenStore(_fresh_tokens(), auth)  # not expired
+    result = store.force_refresh()
+
+    assert result is rotated
+    auth.refresh.assert_called_once()
+
+
+def test_force_refresh_skips_when_already_rotated_past_stale():
+    """If the store already advanced past the token the caller used, a
+    second concurrent 401 must not trigger a redundant refresh (which would
+    rotate again and fire on_refresh again)."""
+    auth = MagicMock(spec=SZGCloudAuth)
+    current = _fresh_tokens()
+    store = TokenStore(current, auth)
+
+    some_other_stale = _expired_tokens()  # not the store's current object
+    result = store.force_refresh(stale=some_other_stale)
+
+    assert result is current
+    auth.refresh.assert_not_called()
+
+
+def test_force_refresh_refreshes_when_stale_matches_current():
+    auth = MagicMock(spec=SZGCloudAuth)
+    rotated = _rotated_tokens()
+    auth.refresh.return_value = rotated
+
+    current = _fresh_tokens()
+    store = TokenStore(current, auth)
+
+    result = store.force_refresh(stale=current)  # caller saw the current token
+
+    assert result is rotated
+    auth.refresh.assert_called_once()
