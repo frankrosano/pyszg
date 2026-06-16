@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -17,7 +18,11 @@ from typing import Any, Callable
 from .cloud_const import (
     CLIENT_ID, REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
 )
-from .exceptions import AuthenticationError
+from .exceptions import (
+    AuthenticationError,
+    SZGConnectionError,
+    SZGTimeoutError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,16 +72,30 @@ class TokenSet:
 
 
 def _decode_jwt_claims(token: str) -> dict[str, Any]:
-    """Decode JWT payload without verification (we trust B2C)."""
+    """Decode a JWT payload without verifying the signature (we trust B2C).
+
+    Returns ``{}`` for a structurally invalid token. Raises on a malformed
+    payload segment so callers can surface a meaningful auth error.
+    """
     parts = token.split(".")
     if len(parts) < 2:
         return {}
-    payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
+    # Pad to a multiple of 4. ``-len % 4`` yields 0 when already aligned,
+    # unlike ``4 - len % 4`` which would append a spurious 4 chars.
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
     return json.loads(base64.urlsafe_b64decode(payload))
 
 
 def _token_request(params: dict[str, str]) -> dict[str, Any]:
-    """Make a token endpoint request."""
+    """Make a token endpoint request.
+
+    Maps transport failures into the SZG exception hierarchy so every
+    refresh/exchange path raises only ``SZGError`` subtypes (an HTTP error
+    -> ``AuthenticationError``, a timeout -> ``SZGTimeoutError``, any other
+    transport failure -> ``SZGConnectionError``). Without this, a network
+    blip during a token refresh would surface as a raw ``URLError`` that
+    downstream consumers (e.g. the HA coordinator) don't classify.
+    """
     data = urllib.parse.urlencode(params).encode()
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     req = urllib.request.Request(TOKEN_URL, data=data, headers=headers)
@@ -86,7 +105,18 @@ def _token_request(params: dict[str, str]) -> dict[str, Any]:
         return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode()
-        raise AuthenticationError(f"Token request failed (HTTP {e.code}): {body[:300]}")
+        raise AuthenticationError(
+            f"Token request failed (HTTP {e.code}): {body[:300]}",
+            status=e.code,
+        ) from e
+    except socket.timeout as exc:
+        raise SZGTimeoutError("Token request timed out") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, socket.timeout):
+            raise SZGTimeoutError("Token request timed out") from exc
+        raise SZGConnectionError(
+            f"Cannot reach token endpoint: {exc.reason}"
+        ) from exc
 
 
 class SZGCloudAuth:
@@ -170,7 +200,10 @@ class SZGCloudAuth:
         if not id_token:
             raise AuthenticationError("No id_token in response")
 
-        claims = _decode_jwt_claims(id_token)
+        try:
+            claims = _decode_jwt_claims(id_token)
+        except Exception as exc:
+            raise AuthenticationError(f"Failed to decode id_token: {exc}") from exc
         expires_in = resp.get("id_token_expires_in", 3600)
         if isinstance(expires_in, str):
             try:

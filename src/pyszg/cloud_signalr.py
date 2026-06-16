@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import socket
@@ -16,7 +15,7 @@ from typing import Any, Callable
 
 import websockets
 
-from .cloud_auth import TokenStore
+from .cloud_auth import TokenStore, _decode_jwt_claims
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
 from .exceptions import (
     SZGConnectionError,
@@ -35,12 +34,7 @@ _TOKEN_REFRESH_MARGIN = 300
 def _get_token_expiry(token: str) -> float:
     """Extract the exp claim from a JWT. Returns 0 on failure."""
     try:
-        parts = token.split(".")
-        if len(parts) < 2:
-            return 0
-        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-        return float(claims.get("exp", 0))
+        return float(_decode_jwt_claims(token).get("exp", 0))
     except Exception:
         return 0
 
@@ -107,6 +101,9 @@ class SZGCloudSignalR:
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._running = False
         self._token_expires_at: float = 0.0
+        # Reused across negotiate / open_cloud_async / WebSocket connects so
+        # we don't reload the system CA bundle on every API call.
+        self._ssl_context = ssl.create_default_context()
 
     @property
     def token_store(self) -> TokenStore:
@@ -151,7 +148,7 @@ class SZGCloudSignalR:
         }
         body = json.dumps(data).encode() if data else None
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        ctx = ssl.create_default_context()
+        ctx = self._ssl_context
         try:
             resp = urllib.request.urlopen(req, timeout=15, context=ctx)
             return json.loads(resp.read().decode())
@@ -275,8 +272,9 @@ class SZGCloudSignalR:
             self._token_expires_at = reconnect_at + _TOKEN_REFRESH_MARGIN
             _LOGGER.debug("Could not read SignalR token expiry, will reconnect in 50min")
 
-        # Pre-create SSL context in executor to avoid blocking the event loop
-        ssl_context = await loop.run_in_executor(None, ssl.create_default_context)
+        # Reuse the cached SSL context (created once in __init__) rather
+        # than building a fresh one per connection.
+        ssl_context = self._ssl_context
 
         _LOGGER.info("Connecting to SignalR...")
         try:
