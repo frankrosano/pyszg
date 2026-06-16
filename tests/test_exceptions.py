@@ -16,7 +16,7 @@ import io
 import json
 import socket
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -55,10 +55,25 @@ def _http_error(status: int, body: str = "") -> urllib.error.HTTPError:
 
 @patch("pyszg.cloud_client.urllib.request.urlopen")
 def test_http_401_maps_to_authentication_error(mock_urlopen):
+    # A persistent 401 triggers one forced token refresh and a retry; when
+    # the retry still 401s, AuthenticationError(401) surfaces. Mock the auth
+    # so the forced refresh stays offline.
     mock_urlopen.side_effect = _http_error(401, json.dumps({"Message": "unauthorized"}))
+    tokens = TokenSet(
+        id_token="header.eyJzdWIiOiJ4In0=.sig",
+        refresh_token="rt",
+        user_id="user-1",
+        expires_at=2_000_000_000,
+    )
+    auth = MagicMock(spec=SZGCloudAuth)
+    auth.refresh.return_value = tokens
+    client = SZGCloudClient(TokenStore(tokens, auth))
+
     with pytest.raises(AuthenticationError) as ei:
-        _client()._request("GET", "/x")
+        client._request("GET", "/x")
     assert ei.value.status == 401
+    # The retry path forced exactly one refresh before giving up.
+    auth.refresh.assert_called_once()
 
 
 @patch("pyszg.cloud_client.urllib.request.urlopen")

@@ -88,9 +88,30 @@ class SZGCloudClient:
         path: str,
         data: dict[str, Any] | None = None,
     ) -> Any:
-        """Make an authenticated API request."""
-        tokens = self._store.get_valid()
+        """Make an authenticated API request.
 
+        On a 401 with a token the store still considers valid, force one
+        refresh and retry before surfacing ``AuthenticationError``. This
+        absorbs clock-skew / rotation blips that would otherwise escalate
+        a single transient 401 into a spurious Home Assistant reauth flow.
+        If the forced refresh fails, or the retry still returns 401, the
+        ``AuthenticationError`` propagates as a genuine auth failure.
+        """
+        tokens = self._store.get_valid()
+        try:
+            return self._send(method, path, data, tokens)
+        except AuthenticationError:
+            tokens = self._store.force_refresh()
+            return self._send(method, path, data, tokens)
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        data: dict[str, Any] | None,
+        tokens: TokenSet,
+    ) -> Any:
+        """Issue a single authenticated request with the given tokens."""
         url = f"{API_BASE}{path}"
         headers = {
             "Authorization": f"Bearer {tokens.id_token}",

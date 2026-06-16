@@ -21,6 +21,12 @@ from .exceptions import AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Refresh this many seconds before the token's actual expiry. Without a
+# margin, a request built right at the boundary can be rejected (HTTP 401)
+# by the time it reaches B2C/APIM once network latency and host/Azure clock
+# skew are accounted for — which would spuriously trigger a reauth flow.
+TOKEN_EXPIRY_MARGIN = 60
+
 
 @dataclass
 class TokenSet:
@@ -34,7 +40,9 @@ class TokenSet:
 
     @property
     def is_expired(self) -> bool:
-        return time.time() >= self.expires_at
+        # Treat the token as expired slightly early so it's proactively
+        # refreshed before the boundary rather than failing a live request.
+        return time.time() >= (self.expires_at - TOKEN_EXPIRY_MARGIN)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -258,18 +266,36 @@ class TokenStore:
         with self._lock:
             if not self._tokens.is_expired:
                 return self._tokens
+            return self._refresh_locked()
 
-            _LOGGER.info("Token expired, refreshing")
-            new_tokens = self._auth.refresh(self._tokens)
-            self._tokens = new_tokens
+    def force_refresh(self) -> TokenSet:
+        """Refresh the tokens regardless of the current expiry estimate.
 
-            if self._on_refresh is not None:
-                try:
-                    self._on_refresh(new_tokens)
-                except Exception:
-                    _LOGGER.exception(
-                        "TokenStore on_refresh callback failed; "
-                        "rotated tokens may not be persisted"
-                    )
+        Used as a backstop when a live request is rejected with HTTP 401
+        even though the local clock still considers the token valid (clock
+        skew, an out-of-band rotation, or a boundary race). Thread-safe and
+        serialized with ``get_valid`` under the same lock, so concurrent
+        callers share the rotation rather than racing it. If the refresh
+        itself fails (e.g. the refresh_token is genuinely dead), the
+        underlying ``AuthenticationError`` propagates so the caller can
+        drive a real reauth.
+        """
+        with self._lock:
+            return self._refresh_locked()
 
-            return new_tokens
+    def _refresh_locked(self) -> TokenSet:
+        """Perform a refresh + fire the on_refresh hook. Caller holds the lock."""
+        _LOGGER.info("Refreshing OAuth tokens")
+        new_tokens = self._auth.refresh(self._tokens)
+        self._tokens = new_tokens
+
+        if self._on_refresh is not None:
+            try:
+                self._on_refresh(new_tokens)
+            except Exception:
+                _LOGGER.exception(
+                    "TokenStore on_refresh callback failed; "
+                    "rotated tokens may not be persisted"
+                )
+
+        return new_tokens
