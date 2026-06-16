@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 from typing import Any
 
-from .appliance import Appliance
+from .appliance import Appliance, ModuleGeneration
 from .cloud_auth import TokenSet, TokenStore
 from .cloud_const import API_BASE, SUBSCRIPTION_KEY
 from .exceptions import (
@@ -101,7 +101,7 @@ class SZGCloudClient:
         try:
             return self._send(method, path, data, tokens)
         except AuthenticationError:
-            tokens = self._store.force_refresh()
+            tokens = self._store.force_refresh(stale=tokens)
             return self._send(method, path, data, tokens)
 
     def _send(
@@ -198,7 +198,11 @@ class SZGCloudClient:
             data=payload,
         )
 
-    def get_appliance_state(self, device_id: str) -> Appliance:
+    def get_appliance_state(
+        self,
+        device_id: str,
+        module_generation: ModuleGeneration | None = None,
+    ) -> Appliance:
         """Get the current state of an appliance via cloud.
 
         Returns a fresh Appliance object with parsed state. Callers that
@@ -206,20 +210,27 @@ class SZGCloudClient:
         instance and call ``update_from_response`` on it; this client is
         stateless.
 
-        Uses 'get' command for CAT modules and 'get_async' for
-        Saber/NGIX modules (which respond differently).
+        Uses 'get' for CAT modules and 'get_async' for Saber/NGIX modules
+        (which respond differently). Pass ``module_generation`` (derivable
+        from the ``applianceId`` the caller already holds) to skip the
+        wasted 'get' probe on Saber/NGIX devices, which only answer
+        'get_async' — otherwise every poll spends an extra round trip
+        getting the CAT "OK" wrapper before falling back.
         """
         appliance = Appliance()
 
-        # Try 'get' first (works for all module types)
-        resp = self.send_command(device_id, "get")
-
-        # CAT modules return "OK" wrapper for some commands
-        if "_raw" in resp:
-            # Fall back to get_async which works for Saber/NGIX
+        if module_generation == ModuleGeneration.SABER:
+            # Saber/NGIX only answer get_async — go straight there.
             resp = self.send_command(device_id, "get_async")
+        else:
+            # Try 'get' first (works for CAT); fall back to get_async when
+            # the module returns the "OK" wrapper instead of state.
+            resp = self.send_command(device_id, "get")
             if "_raw" in resp:
-                return appliance
+                resp = self.send_command(device_id, "get_async")
+
+        if "_raw" in resp:
+            return appliance
 
         # Properties may be at top level or under "resp"
         props = resp.get("resp", resp)

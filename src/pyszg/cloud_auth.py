@@ -301,7 +301,7 @@ class TokenStore:
                 return self._tokens
             return self._refresh_locked()
 
-    def force_refresh(self) -> TokenSet:
+    def force_refresh(self, stale: TokenSet | None = None) -> TokenSet:
         """Refresh the tokens regardless of the current expiry estimate.
 
         Used as a backstop when a live request is rejected with HTTP 401
@@ -312,8 +312,17 @@ class TokenStore:
         itself fails (e.g. the refresh_token is genuinely dead), the
         underlying ``AuthenticationError`` propagates so the caller can
         drive a real reauth.
+
+        If ``stale`` is provided and the store has *already* rotated past
+        it (another thread refreshed while this caller was mid-request),
+        the current tokens are returned without issuing a second refresh.
+        This collapses a burst of concurrent 401s — e.g. the HA coordinator
+        polling every device at once at a token boundary — into a single
+        refresh and a single ``on_refresh`` persistence write.
         """
         with self._lock:
+            if stale is not None and self._tokens is not stale:
+                return self._tokens
             return self._refresh_locked()
 
     def _refresh_locked(self) -> TokenSet:

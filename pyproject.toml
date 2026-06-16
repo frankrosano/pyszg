@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyszg"
-version = "0.3.2"
+version = "0.3.3"
 description = "Local API client for Sub-Zero Group (Sub-Zero, Wolf, Cove) connected appliances"
 readme = "README.md"
 license = {text = "MIT"}

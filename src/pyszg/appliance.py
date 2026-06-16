@@ -288,6 +288,17 @@ class Appliance:
 
         For full state responses, replaces all data.
         For delta updates (partial props), merges into existing state.
+
+        Not thread-safe. This mutates ``raw`` plus many attributes in
+        place without locking. A consumer that updates the same
+        ``Appliance`` from more than one transport — e.g. the HA
+        coordinator's poll (executor thread), local push (executor
+        thread), and cloud SignalR callback (event loop) — must serialize
+        those updates itself (the coordinator does this by gating SignalR
+        on ``local_push_active``). The library intentionally holds no lock
+        because the consumer owns the instance and also reads its
+        attributes concurrently; a lock scoped to this method alone would
+        not make those reads safe.
         """
         # Merge into raw dict rather than replacing, so delta updates
         # don't wipe out properties not included in the update.
