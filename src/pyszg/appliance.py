@@ -31,7 +31,13 @@ class CookMode(IntEnum):
     SELF_CLEAN = 11
     WARM = 12
     ECO = 13
-    UNKNOWN = 14
+    # Out-of-band sentinel for any wire value we don't model. Negative so
+    # it can never collide with a real (non-negative) cook-mode code.
+    UNKNOWN = -1
+
+    @classmethod
+    def _missing_(cls, value: object) -> "CookMode":
+        return cls.UNKNOWN
 
 
 class WashCycle(IntEnum):
@@ -49,6 +55,11 @@ class WashCycle(IntEnum):
     PLASTICS = 10
     ENERGY = 11
     EXTRA_QUIET = 12
+    UNKNOWN = -1
+
+    @classmethod
+    def _missing_(cls, value: object) -> "WashCycle":
+        return cls.UNKNOWN
 
 
 class WashStatus(IntEnum):
@@ -60,6 +71,11 @@ class WashStatus(IntEnum):
     CANCELED = 4
     DRYING = 5
     COMPLETE = 6
+    UNKNOWN = -1
+
+    @classmethod
+    def _missing_(cls, value: object) -> "WashStatus":
+        return cls.UNKNOWN
 
 
 class ApplianceType(IntEnum):

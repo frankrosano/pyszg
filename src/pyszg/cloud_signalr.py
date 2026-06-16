@@ -214,32 +214,57 @@ class SZGCloudSignalR:
         self._running = True
         retry_delay = 5
         max_delay = 300  # 5 minutes max
-        consecutive_failures = 0
+        # Bounded tolerance for *unexpected* errors (likely bugs, not
+        # transport blips). Transient transport failures retry forever.
+        max_unexpected_failures = 5
+        unexpected_failures = 0
 
         while self._running:
             try:
-                consecutive_failures = 0
-                retry_delay = 5  # Reset on successful connection
                 await self._connect_and_listen(device_ids, callback)
+                # Clean return = the listen loop exited to reconnect with a
+                # fresh token. That's a success, so reset backoff + counters.
+                unexpected_failures = 0
+                retry_delay = 5
             except AuthenticationError:
                 # Auth failures are not recoverable by reconnecting — the
                 # caller (e.g. the HA integration) needs to drive a
                 # reauth flow. Re-raise to surface the condition.
                 self._running = False
                 raise
-            except (websockets.exceptions.ConnectionClosed, SZGConnectionError, SZGTimeoutError) as exc:
-                consecutive_failures += 1
+            except (
+                websockets.exceptions.WebSocketException,
+                SZGConnectionError,
+                SZGTimeoutError,
+                asyncio.TimeoutError,
+                OSError,
+            ) as exc:
+                # Known-transient transport failures (ConnectionClosed and
+                # handshake errors are WebSocketException subclasses; OSError
+                # covers socket/SSL/DNS). Retry indefinitely with backoff.
                 _LOGGER.warning(
-                    "SignalR connection lost (attempt %d): %s. Reconnecting in %ds...",
-                    consecutive_failures, exc, retry_delay,
+                    "SignalR connection lost: %s. Reconnecting in %ds...",
+                    exc, retry_delay,
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
-            except Exception as exc:
-                consecutive_failures += 1
+            except Exception:
+                # Unexpected — most likely a bug, not a transport blip.
+                # Retry a bounded number of times then give up loudly so it
+                # surfaces (as a dead background task) instead of looping
+                # forever and spamming tracebacks.
+                unexpected_failures += 1
+                if unexpected_failures >= max_unexpected_failures:
+                    _LOGGER.exception(
+                        "SignalR failed %d consecutive times with unexpected "
+                        "errors; giving up.",
+                        unexpected_failures,
+                    )
+                    self._running = False
+                    raise
                 _LOGGER.exception(
-                    "Unexpected SignalR error (attempt %d). Reconnecting in %ds...",
-                    consecutive_failures, retry_delay,
+                    "Unexpected SignalR error (%d/%d). Reconnecting in %ds...",
+                    unexpected_failures, max_unexpected_failures, retry_delay,
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)

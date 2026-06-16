@@ -204,12 +204,22 @@ class SZGCloudAuth:
             claims = _decode_jwt_claims(id_token)
         except Exception as exc:
             raise AuthenticationError(f"Failed to decode id_token: {exc}") from exc
-        expires_in = resp.get("id_token_expires_in", 3600)
-        if isinstance(expires_in, str):
-            try:
-                expires_in = int(expires_in)
-            except ValueError:
-                expires_in = 3600
+
+        # Prefer the token's own `exp` claim (absolute epoch, in the
+        # server's clock domain — exactly what B2C/APIM validate against)
+        # over the response's relative `id_token_expires_in`. Fall back to
+        # the relative field if the claim is missing or unusable.
+        exp_claim = claims.get("exp")
+        if isinstance(exp_claim, (int, float)) and exp_claim > 0:
+            expires_at = float(exp_claim)
+        else:
+            expires_in = resp.get("id_token_expires_in", 3600)
+            if isinstance(expires_in, str):
+                try:
+                    expires_in = int(expires_in)
+                except ValueError:
+                    expires_in = 3600
+            expires_at = time.time() + expires_in
 
         return TokenSet(
             id_token=id_token,
@@ -217,7 +227,7 @@ class SZGCloudAuth:
             user_id=claims.get("extension_sitecoreUserId", claims.get("sub", "")),
             email=claims.get("email", ""),
             name=f"{claims.get('given_name', '')} {claims.get('family_name', '')}".strip(),
-            expires_at=time.time() + expires_in,
+            expires_at=expires_at,
         )
 
     @staticmethod

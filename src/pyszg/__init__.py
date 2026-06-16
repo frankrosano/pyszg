@@ -3,11 +3,6 @@
 from .client import SZGClient
 from .cloud_auth import SZGCloudAuth, TokenSet, TokenStore
 from .cloud_client import SZGCloudClient
-
-try:
-    from .cloud_signalr import SZGCloudSignalR
-except ImportError:
-    SZGCloudSignalR = None  # websockets not installed
 from .appliance import (
     Appliance,
     ApplianceType,
@@ -27,6 +22,13 @@ from .exceptions import (
     AuthenticationError,
     CommandError,
 )
+
+# SignalR is optional — it needs the `websockets` dependency. Expose it as
+# None when that isn't installed so consumers can feature-detect.
+try:
+    from .cloud_signalr import SZGCloudSignalR
+except ImportError:
+    SZGCloudSignalR = None
 
 __all__ = [
     "SZGClient",
