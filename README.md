@@ -63,22 +63,26 @@ The 6-digit PIN appears on the appliance's display. It's static and reusable.
 For all appliances, including newer NGIX/Saber modules without local IP access:
 
 ```python
-from pyszg import SZGCloudAuth, SZGCloudClient
+from pyszg import SZGCloudAuth, SZGCloudClient, TokenStore
 
 # First time — run examples/cloud_login_password.py to sign in with your
 # Owner's App email + password and write tokens to a file:
 #   python examples/cloud_login_password.py tokens.json
-# (browser fallback for MFA accounts: python examples/cloud_login.py tokens.json)
+# (browser fallback: python examples/cloud_login.py tokens.json)
 auth = SZGCloudAuth()
 tokens = auth.load_tokens("tokens.json")
-tokens = auth.ensure_valid(tokens)
 
-# Subsequent runs — refreshes silently
-tokens = auth.load_tokens("tokens.json")
-tokens = auth.ensure_valid(tokens)
+# Wrap the tokens in a TokenStore. Azure AD B2C rotates the refresh token on
+# every refresh, so on_refresh must persist the new tokens or the next run
+# will fail. Share the same store between SZGCloudClient and SZGCloudSignalR.
+store = TokenStore(
+    tokens,
+    auth,
+    on_refresh=lambda new_tokens: auth.save_tokens(new_tokens, "tokens.json"),
+)
 
-# List all appliances on the account
-client = SZGCloudClient(tokens, auth)
+# List all appliances on the account (refreshes silently when expired)
+client = SZGCloudClient(store)
 devices = client.get_devices()
 
 # Get appliance state (works for all module types)
@@ -95,13 +99,17 @@ Real-time push updates for all appliances via Azure SignalR:
 
 ```python
 import asyncio
-from pyszg import SZGCloudAuth, SZGCloudSignalR
+from pyszg import SZGCloudAuth, SZGCloudSignalR, TokenStore
 
 auth = SZGCloudAuth()
 tokens = auth.load_tokens("tokens.json")
-tokens = auth.ensure_valid(tokens)
+store = TokenStore(
+    tokens,
+    auth,
+    on_refresh=lambda new_tokens: auth.save_tokens(new_tokens, "tokens.json"),
+)
 
-signalr = SZGCloudSignalR(tokens, auth)
+signalr = SZGCloudSignalR(store)
 
 def on_update(device_id, msg_type, data):
     if msg_type == 2:  # delta update
@@ -142,7 +150,8 @@ before giving up.
 
 #### Fallback: browser-and-paste flow
 
-Use this for MFA accounts, or if Sub-Zero changes the sign-in page. The
+Use this if `login_with_password` raises `InteractiveLoginRequired` (for example
+if Sub-Zero changes the sign-in page or adds MFA, which it does not currently offer). The
 library exposes the OAuth building blocks and the interactive flow lives in
 `examples/cloud_login.py`:
 
@@ -157,7 +166,7 @@ Under the hood:
 3. The browser tries to redirect to a URL starting with `msauth.com.subzero.group.owners.app://auth?code=...` but browsers can't resolve that scheme. The page won't load — that's expected.
 4. Open developer tools (F12 or Cmd+Option+I) → **Console** tab. The blocked navigation logs there with the full redirect URL.
 5. Copy that URL into `redirect_url.txt`, then press Enter in the terminal.
-5. The script exchanges the code via `SZGCloudAuth.exchange_code` and writes the resulting tokens to disk.
+6. The script exchanges the code via `SZGCloudAuth.exchange_code` and writes the resulting tokens to disk.
 6. Subsequent calls use `auth.ensure_valid()` to silently refresh — no browser needed.
 
 ## Supported Appliances
