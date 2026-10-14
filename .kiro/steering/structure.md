@@ -22,13 +22,15 @@ pyszg/
 │   ├── get_pin.py          # Local: trigger PIN display
 │   ├── push_demo.py        # Local: persistent push stream
 │   ├── dump_state.py       # Local: dump full raw state
-│   ├── cloud_login.py      # Cloud: one-time interactive OAuth login
+│   ├── cloud_login_password.py # Cloud: headless email+password login
+│   ├── cloud_login.py      # Cloud: browser-paste OAuth login (MFA fallback)
 │   ├── cloud_usage.py      # Cloud REST: list + read appliances
 │   └── cloud_push_demo.py  # Cloud SignalR: real-time push
 └── tests/
     ├── __init__.py
     ├── test_appliance.py   # Appliance dataclass + update_from_response
     ├── test_cloud_client.py# SZGCloudClient REST paths + auth-error mapping
+    ├── test_cloud_login.py # login_with_password (offline, scripted opener)
     ├── test_exceptions.py  # Exception hierarchy + transport-error classification
     └── test_token_store.py # TokenStore refresh, callback, locking, sharing
 ```

@@ -20,6 +20,7 @@ from .exceptions import (
     SZGConnectionError,
     SZGTimeoutError,
     AuthenticationError,
+    InteractiveLoginRequired,
     CommandError,
 )
 
@@ -51,5 +52,6 @@ __all__ = [
     "SZGConnectionError",
     "SZGTimeoutError",
     "AuthenticationError",
+    "InteractiveLoginRequired",
     "CommandError",
 ]

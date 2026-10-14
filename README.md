@@ -65,9 +65,10 @@ For all appliances, including newer NGIX/Saber modules without local IP access:
 ```python
 from pyszg import SZGCloudAuth, SZGCloudClient
 
-# First time — run examples/cloud_login.py to perform the interactive
-# browser login and write tokens to a file:
-#   python examples/cloud_login.py tokens.json
+# First time — run examples/cloud_login_password.py to sign in with your
+# Owner's App email + password and write tokens to a file:
+#   python examples/cloud_login_password.py tokens.json
+# (browser fallback for MFA accounts: python examples/cloud_login.py tokens.json)
 auth = SZGCloudAuth()
 tokens = auth.load_tokens("tokens.json")
 tokens = auth.ensure_valid(tokens)
@@ -112,9 +113,38 @@ asyncio.run(signalr.connect(callback=on_update))
 
 ### Cloud Auth Flow
 
-The library only exposes the OAuth building blocks. The interactive
-browser-and-paste flow is in `examples/cloud_login.py`. Run it once
-to produce a tokens file:
+The preferred way to sign in is `SZGCloudAuth.login_with_password`, which
+drives the Sub-Zero sign-in page over plain HTTP (no browser). The password
+is used once and never stored. Run the example once to produce a tokens file:
+
+```bash
+python examples/cloud_login_password.py tokens.json
+```
+
+Or from code:
+
+```python
+from pyszg import AuthenticationError, InteractiveLoginRequired, SZGCloudAuth
+
+auth = SZGCloudAuth()
+try:
+    tokens = auth.login_with_password(email, password)
+except InteractiveLoginRequired:
+    ...  # MFA / extra step / changed page: use the browser flow below
+except AuthenticationError:
+    ...  # wrong email or password (don't retry blindly: lockout risk)
+```
+
+`InteractiveLoginRequired` is a subclass of `AuthenticationError`, so catch
+it first. Network problems and Sub-Zero outages raise `SZGConnectionError` /
+`SZGTimeoutError`; a transient token-endpoint failure is retried a few times
+before giving up.
+
+#### Fallback: browser-and-paste flow
+
+Use this for MFA accounts, or if Sub-Zero changes the sign-in page. The
+library exposes the OAuth building blocks and the interactive flow lives in
+`examples/cloud_login.py`:
 
 ```bash
 python examples/cloud_login.py tokens.json
@@ -179,7 +209,10 @@ Check compatibility at: https://www.subzero-wolf.com/assistance/answers/multi-br
 ## Examples
 
 ```bash
-# Cloud: one-time interactive login (writes cloud_tokens.json)
+# Cloud: one-time email + password login (writes cloud_tokens.json)
+python examples/cloud_login_password.py
+
+# Cloud: browser-and-paste login fallback (MFA accounts)
 python examples/cloud_login.py
 
 # Local: read appliance state

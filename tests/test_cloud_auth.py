@@ -23,6 +23,7 @@ from pyszg import (
     SZGConnectionError,
     SZGTimeoutError,
     TokenSet,
+    TokenStore,
 )
 from pyszg.cloud_auth import _decode_jwt_claims, _token_request
 
@@ -111,6 +112,48 @@ def test_token_request_http_error_maps_to_auth_error(mock_urlopen):
     with pytest.raises(AuthenticationError) as ei:
         _token_request({"grant_type": "refresh_token"})
     assert ei.value.status == 400
+
+
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_5xx_maps_to_connection_error(mock_urlopen):
+    """A 504 HTML gateway page is an outage, not a credential failure."""
+    html = b"<!DOCTYPE html><html><body>Gateway Timeout PAGE-BODY</body></html>"
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=504, msg="Gateway Timeout", hdrs={},
+        fp=io.BytesIO(html),
+    )
+    with pytest.raises(SZGConnectionError) as ei:
+        _token_request({"grant_type": "authorization_code"})
+    assert not isinstance(ei.value, AuthenticationError)
+    assert ei.value.status == 504
+    assert "PAGE-BODY" not in str(ei.value)
+    assert "<html" not in str(ei.value)
+
+
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_4xx_still_auth_error(mock_urlopen):
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=499, msg="x", hdrs={},
+        fp=io.BytesIO(b'{"error":"invalid_grant"}'),
+    )
+    with pytest.raises(AuthenticationError) as ei:
+        _token_request({"grant_type": "refresh_token"})
+    assert ei.value.status == 499
+
+
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_store_get_valid_propagates_connection_error_for_503(mock_urlopen):
+    """An expired token + token-endpoint 503 must not look like a dead
+    refresh token (which would trigger a spurious reauth)."""
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=503, msg="Service Unavailable", hdrs={},
+        fp=io.BytesIO(b"<html>down</html>"),
+    )
+    store = TokenStore(TokenSet(refresh_token="rt", expires_at=time.time() - 10))
+    with pytest.raises(SZGConnectionError) as ei:
+        store.get_valid()
+    assert not isinstance(ei.value, AuthenticationError)
+    assert ei.value.status == 503
 
 
 @patch("pyszg.cloud_auth.urllib.request.urlopen")

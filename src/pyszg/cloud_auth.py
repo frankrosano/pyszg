@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import http.cookiejar
 import json
 import logging
+import re
+import secrets
 import socket
 import ssl
 import threading
@@ -16,15 +20,31 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .cloud_const import (
-    CLIENT_ID, REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
+    B2C_HOST, CLIENT_ID, REDIRECT_URI, AUTHORIZE_URL, TOKEN_URL, SCOPES,
 )
 from .exceptions import (
     AuthenticationError,
+    InteractiveLoginRequired,
     SZGConnectionError,
+    SZGError,
     SZGTimeoutError,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Headless sign-in (login_with_password) tunables.
+_B2C_TIMEOUT = 15            # seconds, per B2C HTML/XHR request
+_MAX_BODY = 400_000          # max bytes read from any B2C response
+_TOKEN_ATTEMPTS = 3          # authorization-code exchange attempts
+_TOKEN_RETRY_DELAY = 2.0     # seconds between exchange attempts
+# The B2C hosted pages are served to browsers; present as one for those steps
+# only. The token endpoint keeps the default urllib UA (see _token_request).
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_TENANT_PATH = re.compile(r"^/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 
 # Refresh this many seconds before the token's actual expiry. Without a
 # margin, a request built right at the boundary can be rejected (HTTP 401)
@@ -95,6 +115,11 @@ def _token_request(params: dict[str, str]) -> dict[str, Any]:
     transport failure -> ``SZGConnectionError``). Without this, a network
     blip during a token refresh would surface as a raw ``URLError`` that
     downstream consumers (e.g. the HA coordinator) don't classify.
+
+    An HTTP 5xx (e.g. a transient 504 gateway timeout, whose body is an HTML
+    page) is a service outage, not a credential problem, so it maps to
+    ``SZGConnectionError`` (with ``status`` set and no body in the message).
+    Only 4xx responses raise ``AuthenticationError``.
     """
     data = urllib.parse.urlencode(params).encode()
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -104,6 +129,11 @@ def _token_request(params: dict[str, str]) -> dict[str, Any]:
         resp = urllib.request.urlopen(req, timeout=15, context=ctx)
         return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
+        if e.code >= 500:
+            raise SZGConnectionError(
+                f"Token endpoint unavailable (HTTP {e.code})",
+                status=e.code,
+            ) from e
         body = e.read().decode()
         raise AuthenticationError(
             f"Token request failed (HTTP {e.code}): {body[:300]}",
@@ -119,14 +149,164 @@ def _token_request(params: dict[str, str]) -> dict[str, Any]:
         ) from exc
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Don't follow 3xx; the redirect then surfaces as an ``HTTPError``.
+
+    B2C finishes sign-in with a 302 to a custom-scheme URL carrying the
+    authorization code. That URL must be read, never fetched.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _build_opener() -> tuple[urllib.request.OpenerDirector, http.cookiejar.CookieJar]:
+    """Opener with a cookie jar and no redirect following."""
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar), _NoRedirectHandler()
+    )
+    return opener, jar
+
+
+def _b2c_request(
+    opener: urllib.request.OpenerDirector,
+    method: str,
+    url: str,
+    *,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], str]:
+    """Perform one B2C page/XHR request; return ``(status, headers, body)``.
+
+    Response headers are returned with lower-cased names. 2xx/3xx/4xx
+    statuses are returned as values for the caller to interpret; HTTP 5xx
+    and 429 and all transport failures raise ``SZGConnectionError`` /
+    ``SZGTimeoutError``. Exception messages never include the URL (it
+    carries ``tx``/``csrf``) or the request body.
+    """
+    hdrs = {"User-Agent": _BROWSER_UA}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        resp = opener.open(req, timeout=_B2C_TIMEOUT)
+        status = resp.status
+        resp_headers = resp.headers
+        body = resp.read(_MAX_BODY).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status = e.code
+        resp_headers = e.headers or {}
+        body = e.read(_MAX_BODY).decode("utf-8", "replace") if e.fp else ""
+    except socket.timeout as exc:
+        raise SZGTimeoutError("Sign-in request timed out") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, socket.timeout):
+            raise SZGTimeoutError("Sign-in request timed out") from exc
+        raise SZGConnectionError(
+            f"Cannot reach sign-in service: {exc.reason}"
+        ) from exc
+    except OSError as exc:
+        raise SZGConnectionError(
+            f"Cannot reach sign-in service: {type(exc).__name__}"
+        ) from exc
+    if status >= 500 or status == 429:
+        raise SZGConnectionError(
+            f"Sign-in service unavailable (HTTP {status})", status=status
+        )
+    return status, {k.lower(): v for k, v in resp_headers.items()}, body
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return a PKCE ``(verifier, S256 challenge)`` pair."""
+    verifier = secrets.token_urlsafe(64)[:128]
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    return verifier, challenge
+
+
+def _parse_settings(page: str) -> dict[str, Any] | None:
+    """Extract the inline ``var SETTINGS = {...};`` JSON object, or None."""
+    m = re.search(r"var\s+SETTINGS\s*=\s*", page)
+    if not m:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(page, m.end())
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _settings_fields(settings: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    """Return ``(csrf, trans_id, tenant_path, policy, api)`` from SETTINGS.
+
+    Raises ``InteractiveLoginRequired`` if a key is missing or malformed
+    (the sign-in page changed). The path-like values are validated because
+    they are interpolated into request URLs.
+    """
+    hosts = settings.get("hosts")
+    hosts = hosts if isinstance(hosts, dict) else {}
+    csrf = settings.get("csrf")
+    trans_id = settings.get("transId")
+    tenant = hosts.get("tenant")
+    policy = hosts.get("policy")
+    api = settings.get("api")
+    if not all(isinstance(v, str) and v for v in (csrf, trans_id, tenant, policy, api)):
+        raise InteractiveLoginRequired(
+            "Sign-in page has an unexpected layout; use the browser login flow"
+        )
+    if not (
+        _SAFE_TENANT_PATH.match(tenant)
+        and _SAFE_SEGMENT.match(policy)
+        and _SAFE_SEGMENT.match(api)
+    ):
+        raise InteractiveLoginRequired(
+            "Sign-in page has an unexpected layout; use the browser login flow"
+        )
+    return csrf, trans_id, tenant, policy, api
+
+
+def _extract_code(location: str, state: str) -> str:
+    """Pull the authorization code out of B2C's final redirect ``Location``.
+
+    B2C appends a trailing ``/`` to the custom-scheme redirect and puts
+    ``state`` before ``code``, so compare scheme+host+path (slash tolerant)
+    and parse the query rather than matching a literal prefix. The URL is
+    never fetched.
+
+    Raises ``InteractiveLoginRequired`` if the redirect is foreign, carries
+    an ``error`` or has no code; ``SZGError`` on a ``state`` mismatch.
+    """
+    split = urllib.parse.urlsplit(location)
+    base = f"{split.scheme}://{split.netloc}{split.path}".rstrip("/")
+    qs = urllib.parse.parse_qs(split.query)
+    code = (qs.get("code") or [""])[0]
+    if base != REDIRECT_URI.rstrip("/") or "error" in qs or not code:
+        raise InteractiveLoginRequired(
+            "Sign-in did not return an authorization code; "
+            "use the browser login flow"
+        )
+    got_state = (qs.get("state") or [""])[0]
+    if not secrets.compare_digest(got_state.encode(), state.encode()):
+        raise SZGError("State mismatch in sign-in redirect")
+    return code
+
+
 class SZGCloudAuth:
     """Handles OAuth2 authentication with the Sub-Zero Group cloud.
 
     Usage:
         auth = SZGCloudAuth()
 
-        # Construct the authorize URL and have the user log in via browser
-        # (see examples/cloud_login.py for the full interactive flow):
+        # Preferred: headless sign-in with the Owner's App email + password
+        # (no browser). Raises InteractiveLoginRequired if B2C needs more
+        # than a password (e.g. MFA) -- fall back to the browser flow below.
+        tokens = auth.login_with_password(email, password)
+
+        # Fallback: construct the authorize URL and have the user log in via
+        # browser (see examples/cloud_login.py for the full interactive flow):
         auth_url = auth.get_authorize_url(challenge, state)
 
         # Exchange the redirect code for tokens:
@@ -151,6 +331,122 @@ class SZGCloudAuth:
             "code_verifier": code_verifier,
         })
         return self._parse_token_response(resp)
+
+    def login_with_password(self, email: str, password: str) -> TokenSet:
+        """Sign in headlessly with the Owner's App email + password.
+
+        Drives the Azure AD B2C hosted sign-in page with plain HTTP (no
+        browser): authorize -> parse ``SETTINGS`` -> POST credentials to
+        ``SelfAsserted`` -> read the 302 from ``confirmed`` -> exchange the
+        code. The password is used once and never stored, logged or put in
+        an exception message.
+
+        Raises:
+            AuthenticationError: email/password empty or rejected. Do not
+                retry blindly (B2C may lock the account).
+            InteractiveLoginRequired: the credentials were not rejected but
+                sign-in cannot finish headlessly (MFA, consent page, changed
+                page layout). Use the browser flow instead.
+            SZGConnectionError / SZGTimeoutError: network failure, HTTP
+                5xx/429 from B2C, or the token endpoint stayed unavailable
+                after retries. Safe to retry later.
+            SZGError: ``state`` mismatch in the final redirect.
+        """
+        if not email or not email.strip() or not password:
+            raise AuthenticationError("Email and password are required")
+
+        verifier, challenge = _pkce_pair()
+        state = secrets.token_urlsafe(32)
+        auth_url = self.get_authorize_url(challenge, state)
+        opener, _jar = _build_opener()
+
+        # Step 1: sign-in page.
+        _LOGGER.debug("Headless login: GET authorize")
+        status, _hdrs, page = _b2c_request(opener, "GET", auth_url)
+        if status != 200:
+            raise InteractiveLoginRequired(
+                f"Sign-in page unavailable (HTTP {status}); "
+                "use the browser login flow"
+            )
+
+        # Step 2: SETTINGS (csrf, transId, tenant, policy, api).
+        _LOGGER.debug("Headless login: parse SETTINGS")
+        settings = _parse_settings(page)
+        if settings is None:
+            raise InteractiveLoginRequired(
+                "Sign-in page has an unexpected layout; use the browser login flow"
+            )
+        csrf, trans_id, tenant, policy, api = _settings_fields(settings)
+        tx = urllib.parse.quote(trans_id, safe="=")
+        base = f"https://{B2C_HOST}{tenant}"
+        select_url = f"{base}/SelfAsserted?tx={tx}&p={policy}"
+        confirm_url = (
+            f"{base}/api/{api}/confirmed"
+            f"?rememberMe=false&csrf_token={urllib.parse.quote(csrf, safe='')}"
+            f"&tx={tx}&p={policy}"
+        )
+
+        # Step 3: credentials. Field ids are not discoverable from the page,
+        # but signInName/password are what the hosted page posts.
+        _LOGGER.debug("Headless login: POST credentials")
+        body = urllib.parse.urlencode({
+            "request_type": "RESPONSE",
+            "signInName": email.strip(),
+            "password": password,
+        }).encode()
+        try:
+            status, _hdrs, resp_body = _b2c_request(
+                opener, "POST", select_url, data=body,
+                headers={
+                    "X-CSRF-TOKEN": csrf,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Origin": f"https://{B2C_HOST}",
+                    "Referer": auth_url,
+                },
+            )
+        finally:
+            del body, password  # don't keep the secret around
+        try:
+            parsed = json.loads(resp_body)
+        except ValueError:
+            parsed = None
+        json_status = str(parsed.get("status")) if isinstance(parsed, dict) else None
+        if status == 400 or json_status == "400":
+            raise AuthenticationError("Invalid email or password", status=400)
+        if not (status == 200 and json_status == "200"):
+            raise InteractiveLoginRequired(
+                "Sign-in returned an unexpected response; "
+                "use the browser login flow"
+            )
+
+        # Step 4: confirmed -> 302 to the custom-scheme redirect (not fetched).
+        _LOGGER.debug("Headless login: GET confirmed")
+        status, hdrs, _page2 = _b2c_request(
+            opener, "GET", confirm_url, headers={"Referer": auth_url}
+        )
+        if status not in (301, 302, 303, 307) or not hdrs.get("location"):
+            # 200 HTML => MFA / consent / terms page; anything else is odd too.
+            raise InteractiveLoginRequired(
+                "Sign-in needs an additional step (for example MFA); "
+                "use the browser login flow"
+            )
+        code = _extract_code(hdrs["location"], state)
+
+        # Step 5: exchange the code. A transient 504 here was observed live;
+        # retrying the same code succeeded. Retry only transport/5xx errors
+        # (never 4xx such as invalid_grant).
+        _LOGGER.debug("Headless login: exchange code")
+        for attempt in range(1, _TOKEN_ATTEMPTS + 1):
+            try:
+                return self.exchange_code(code, verifier)
+            except (SZGConnectionError, SZGTimeoutError):
+                if attempt == _TOKEN_ATTEMPTS:
+                    raise
+                _LOGGER.debug("Headless login: token exchange attempt %d failed", attempt)
+                time.sleep(_TOKEN_RETRY_DELAY)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def refresh(self, tokens: TokenSet) -> TokenSet:
         """Refresh tokens using the refresh token."""
