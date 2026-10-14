@@ -167,7 +167,7 @@ Under the hood:
 4. Open developer tools (F12 or Cmd+Option+I) → **Console** tab. The blocked navigation logs there with the full redirect URL.
 5. Copy that URL into `redirect_url.txt`, then press Enter in the terminal.
 6. The script exchanges the code via `SZGCloudAuth.exchange_code` and writes the resulting tokens to disk.
-6. Subsequent calls use `auth.ensure_valid()` to silently refresh — no browser needed.
+7. Subsequent runs refresh silently through the `TokenStore` (`on_refresh` writes the rotated tokens back to disk) — no browser needed.
 
 ## Supported Appliances
 
