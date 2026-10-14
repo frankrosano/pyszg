@@ -148,6 +148,12 @@ it first. Network problems and Sub-Zero outages raise `SZGConnectionError` /
 `SZGTimeoutError`; a transient token-endpoint failure is retried a few times
 before giving up.
 
+When the token endpoint rejects a request (4xx), `AuthenticationError.code`
+holds the Azure AD B2C error code if the response contained one, else `None`.
+Compare it with `B2C_ERR_GRANT_EXPIRED` (maximum sign-in age reached) or
+`B2C_ERR_GRANT_REVOKED` (for example after a password change) to tell the user
+why they need to sign in again.
+
 #### Fallback: browser-and-paste flow
 
 Use this if `login_with_password` raises `InteractiveLoginRequired` (for example

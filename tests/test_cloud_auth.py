@@ -18,7 +18,10 @@ from unittest.mock import patch
 import pytest
 
 from pyszg import (
+    B2C_ERR_GRANT_EXPIRED,
+    B2C_ERR_GRANT_REVOKED,
     AuthenticationError,
+    InteractiveLoginRequired,
     SZGCloudAuth,
     SZGConnectionError,
     SZGTimeoutError,
@@ -141,6 +144,61 @@ def test_token_request_4xx_still_auth_error(mock_urlopen):
     assert ei.value.status == 499
 
 
+def _b2c_error_body(code: str) -> bytes:
+    desc = f"{code}: The provided grant has expired. Correlation ID: abc"
+    return json.dumps({"error": "invalid_grant", "error_description": desc}).encode()
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_400_parses_grant_expired_code(mock_urlopen):
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=400, msg="bad", hdrs={},
+        fp=io.BytesIO(_b2c_error_body("AADB2C90080")),
+    )
+    with pytest.raises(AuthenticationError) as ei:
+        _token_request({"grant_type": "refresh_token"})
+    assert ei.value.status == 400
+    assert ei.value.code == "AADB2C90080" == B2C_ERR_GRANT_EXPIRED
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_400_parses_grant_revoked_code(mock_urlopen):
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=400, msg="bad", hdrs={},
+        fp=io.BytesIO(_b2c_error_body("AADB2C90129")),
+    )
+    with pytest.raises(AuthenticationError) as ei:
+        _token_request({"grant_type": "refresh_token"})
+    assert ei.value.code == "AADB2C90129" == B2C_ERR_GRANT_REVOKED
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_4xx_code_is_none_when_absent(mock_urlopen):
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=400, msg="bad", hdrs={},
+        fp=io.BytesIO(b'{"error":"invalid_grant"}'),
+    )
+    with pytest.raises(AuthenticationError) as ei:
+        _token_request({"grant_type": "refresh_token"})
+    assert ei.value.code is None
+    assert ei.value.status == 400
+@patch("pyszg.cloud_auth.urllib.request.urlopen")
+def test_token_request_5xx_with_b2c_code_still_connection_error(mock_urlopen):
+    """5xx is an outage even if the body happens to mention a B2C code."""
+    mock_urlopen.side_effect = urllib.error.HTTPError(
+        url="https://token", code=503, msg="Service Unavailable", hdrs={},
+        fp=io.BytesIO(_b2c_error_body("AADB2C90080")),
+    )
+    with pytest.raises(SZGConnectionError) as ei:
+        _token_request({"grant_type": "refresh_token"})
+    assert not isinstance(ei.value, AuthenticationError)
+    assert not hasattr(ei.value, "code")
+    assert ei.value.status == 503
+def test_authentication_error_code_is_backward_compatible():
+    plain = AuthenticationError("msg")
+    assert (plain.status, plain.code) == (None, None)
+    with_status = AuthenticationError("msg", status=400)
+    assert (with_status.status, with_status.code) == (400, None)
+    full = AuthenticationError("msg", status=400, code="AADB2C90080")
+    assert str(full) == "msg"
+    assert full.code == "AADB2C90080"
+    sub = InteractiveLoginRequired("needs browser")
+    assert isinstance(sub, AuthenticationError)
+    assert sub.code is None and sub.status is None
 @patch("pyszg.cloud_auth.urllib.request.urlopen")
 def test_token_store_get_valid_propagates_connection_error_for_503(mock_urlopen):
     """An expired token + token-endpoint 503 must not look like a dead

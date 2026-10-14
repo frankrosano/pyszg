@@ -22,6 +22,8 @@ from .exceptions import (
     AuthenticationError,
     InteractiveLoginRequired,
     CommandError,
+    B2C_ERR_GRANT_EXPIRED,
+    B2C_ERR_GRANT_REVOKED,
 )
 
 # SignalR is optional — it needs the `websockets` dependency. Expose it as
@@ -54,4 +56,6 @@ __all__ = [
     "AuthenticationError",
     "InteractiveLoginRequired",
     "CommandError",
+    "B2C_ERR_GRANT_EXPIRED",
+    "B2C_ERR_GRANT_REVOKED",
 ]

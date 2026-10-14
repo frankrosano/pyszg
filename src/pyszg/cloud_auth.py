@@ -135,9 +135,13 @@ def _token_request(params: dict[str, str]) -> dict[str, Any]:
                 status=e.code,
             ) from e
         body = e.read().decode()
+        # B2C puts an AADB2C##### code in the OAuth error_description; surface
+        # it so callers can distinguish e.g. an expired vs revoked grant.
+        match = re.search(r"AADB2C\d+", body)
         raise AuthenticationError(
             f"Token request failed (HTTP {e.code}): {body[:300]}",
             status=e.code,
+            code=match.group(0) if match else None,
         ) from e
     except socket.timeout as exc:
         raise SZGTimeoutError("Token request timed out") from exc
